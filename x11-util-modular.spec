@@ -14,6 +14,7 @@ License: GPLv2+ and MIT
 ########################################################################
 # git format-patch xorg-modular-0.0.1@mandriva..mandriva+gpl
 Patch1: 0001-Initial-set-of-scripts-to-check-for-package-dependen.patch
+Patch2: 0002-Fix-some-typos-and-reflect-correction-of-repository.patch
 ########################################################################
 
 %description
