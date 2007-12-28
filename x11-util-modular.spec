@@ -2,7 +2,7 @@ Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
 Version: 0.0.1
-Release: %mkrel 1
+Release: %mkrel 2
 Group: Development/X11
 ########################################################################
 # git clone git://git.mandriva.com/people/pcpa/xorg/util/modular xorg/util/modular
@@ -15,6 +15,7 @@ License: GPLv2+ and MIT
 # git format-patch xorg-modular-0.0.1@mandriva..mandriva+gpl
 Patch1: 0001-Initial-set-of-scripts-to-check-for-package-dependen.patch
 Patch2: 0002-Fix-some-typos-and-reflect-correction-of-repository.patch
+Patch3: 0003-Initial-support-to-also-allow-building-from-tarballs.patch
 ########################################################################
 
 %description
