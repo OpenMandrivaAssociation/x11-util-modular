@@ -25,6 +25,8 @@ Scripts used for X.org package management.
 %setup -q -n %{name}-%{version}
 
 %patch1 -p1
+%patch2 -p1
+%patch3 -p1
 
 %build
 
