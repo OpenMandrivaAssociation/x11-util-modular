@@ -16,6 +16,7 @@ License: GPLv2+ and MIT
 Patch1: 0001-Initial-set-of-scripts-to-check-for-package-dependen.patch
 Patch2: 0002-Fix-some-typos-and-reflect-correction-of-repository.patch
 Patch3: 0003-Initial-support-to-also-allow-building-from-tarballs.patch
+Patch4: 0004-Add-several-new-options-to-x-build.pl-including-c.patch
 ########################################################################
 
 %description
@@ -27,6 +28,7 @@ Scripts used for X.org package management.
 %patch1 -p1
 %patch2 -p1
 %patch3 -p1
+%patch4 -p1
 
 %build
 
