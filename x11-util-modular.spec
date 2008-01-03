@@ -2,7 +2,7 @@ Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
 Version: 0.0.1
-Release: %mkrel 2
+Release: %mkrel 3
 Group: Development/X11
 ########################################################################
 # git clone git://git.mandriva.com/people/pcpa/xorg/util/modular xorg/util/modular
@@ -10,6 +10,8 @@ Group: Development/X11
 # git-archive --format=tar --prefix=x11-util-modular-0.0.1/ xorg-modular-0.0.1@mandriva | bzip2 -9 > x11-util-modular-0.0.1.tar.bz2
 ########################################################################
 Source0: %{name}-%{version}.tar.bz2
+# Fixme - implement a better method to make available this information
+Source1: depsdir.tar.bz2
 License: GPLv2+ and MIT
 ########################################################################
 # git format-patch xorg-modular-0.0.1@mandriva..mandriva+gpl
@@ -23,7 +25,7 @@ Patch4: 0004-Add-several-new-options-to-x-build.pl-including-c.patch
 Scripts used for X.org package management.
 
 %prep
-%setup -q -n %{name}-%{version}
+%setup -q -c %{name}-%{version} -b1
 
 %patch1 -p1
 %patch2 -p1
@@ -33,7 +35,7 @@ Scripts used for X.org package management.
 %build
 
 %install
-#rm -rf %{buildroot}
+rm -rf %{buildroot}
 for script in \
 	x-build.pl \
 	x-check-deps.pl \
@@ -55,12 +57,16 @@ done
 
 # Directory to store dependency files
 mkdir -p %{buildroot}/%{_datadir}/X11/mandriva
+for file in depsdir/*.deps depsdir/*.list; do
+    install -m 644 $file %{buildroot}/%{_datadir}/X11/mandriva
+done
 
 %clean
-#rm -rf %{buildroot}
+rm -rf %{buildroot}
 
 %files
 %defattr(-,root,root)
 %{_bindir}/*.pl
 %doc %{_docdir}/%{name}/*
 %dir %{_datadir}/X11/mandriva
+%{_datadir}/X11/mandriva/*
