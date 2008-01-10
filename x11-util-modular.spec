@@ -2,7 +2,7 @@ Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
 Version: 0.0.1
-Release: %mkrel 4
+Release: %mkrel 5
 Group: Development/X11
 ########################################################################
 # git clone git://git.mandriva.com/people/pcpa/xorg/util/modular xorg/util/modular
@@ -24,6 +24,7 @@ Patch6: 0006-Bug-fixes-including-better-help-for-setting-defaul.patch
 Patch7: 0007-Add-complete-support-for-generating-the-data-files.patch
 Patch8: 0008-Changed-to-require-installing-rpms-as-they-are-bui.patch
 Patch9: 0009-Add-more-packages-and-better-error-check-to-x-buil.patch
+Patch10:0010-Change-x-build.pl-package-build-order-to-match-lis.patch
 ########################################################################
 
 %description
@@ -41,6 +42,7 @@ Scripts used for X.org package management.
 %patch7 -p1
 %patch8 -p1
 %patch9 -p1
+%patch10 -p1
 
 %build
 
