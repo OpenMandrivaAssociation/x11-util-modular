@@ -2,7 +2,7 @@ Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
 Version: 0.0.2
-Release: %mkrel 1
+Release: %mkrel 2
 Group: Development/X11
 ########################################################################
 # git clone git://git.mandriva.com/people/pcpa/xorg/util/modular xorg/util/modular
@@ -21,7 +21,7 @@ License: GPLv2+ and MIT
 Scripts used for X.org package management.
 
 %prep
-%setup -q -c %{name}-%{version} -b1
+%setup -q -a1
 
 %build
 
@@ -34,14 +34,9 @@ for file in depsdir/*.deps depsdir/*.list; do
     install -m 644 $file %{buildroot}/%{_datadir}/X11/mandriva
 done
 
-
-if [ -d %{name}-%{version} ]; then
-    cd %{name}-%{version}
-fi
-
 for script in \
 	x-build.pl \
-	x-check-deps.pl \
+	x-trace.pl \
 	x-check-rpm-deps.pl \
 	x-check-symbols.pl \
 	; do
