@@ -1,57 +1,44 @@
 Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
-Version: 0.0.2
-Release: %mkrel 2
+Version: 0.5
+Release: %mkrel 1
 Group: Development/X11
 ########################################################################
-# git clone git://git.mandriva.com/people/pcpa/xorg/util/modular xorg/util/modular
+# git clone git://anongit.freedesktop.org/xorg/util/modular xorg/util/modular
 # cd xorg/util/modular
-# git-archive --format=tar --prefix=x11-util-modular-0.0.2/ xorg-modular-0.0.2@mandriva | bzip2 -9 > x11-util-modular-0.0.2.tar.bz2
+# git-archive --format=tar --prefix=%{name}-%{version}/ d58fd2e3668c8940d5d0ebe4b9b3057eee7aa5ce | bzip2 -9 > %{name}-%{version}.tar.bz2
 ########################################################################
 Source0: %{name}-%{version}.tar.bz2
-# Fixme - implement a better method to make available this information
-Source1: depsdir.tar.bz2
 License: GPLv2+ and MIT
-########################################################################
-# git format-patch xorg-modular-0.0.2@mandriva..mandriva+gpl
-########################################################################
+
+Requires: perl sudo
+Requires: git-core cvs
+Requires: make gcc bison flex autoconf
+Requires: glibc-devel freetype2-devel
+Requires: strace wget
+
+Patch1: 0001-Add-a-set-of-scripts-to-allow-easier-build-of-xorg-l.patch
 
 %description
 Scripts used for X.org package management.
 
 %prep
-%setup -q -a1
+%setup -q -n %{name}-%{version}
+
+%patch1 -p1
 
 %build
 
 %install
 rm -rf %{buildroot}
 
-# Directory to store dependency files
-mkdir -p %{buildroot}/%{_datadir}/X11/mandriva
-for file in depsdir/*.deps depsdir/*.list; do
-    install -m 644 $file %{buildroot}/%{_datadir}/X11/mandriva
+pushd xorg-scripts
+for script in *.pl; do
+	install -D -m 755 $script %{buildroot}/%{_bindir}/$script
 done
-
-for script in \
-	x-build.pl \
-	x-trace.pl \
-	x-check-rpm-deps.pl \
-	x-check-symbols.pl \
-	; do
-	install -D -m 755 mandriva/bin/$script %{buildroot}/%{_bindir}/$script
-done
-
-for doc in \
-	git.txt \
-	README.building \
-	x-check-symbols.pl.txt \
-	README \
-	x-check-deps.pl.txt \
-	; do
-	install -D -m 644 mandriva/docs/$doc %{buildroot}/%{_docdir}/%{name}/$doc
-done
+install -D -m 644 xorg-scripts.txt %{buildroot}/%{_docdir}/%{name}/xorg-scripts.txt
+popd
 
 %clean
 rm -rf %{buildroot}
@@ -60,5 +47,3 @@ rm -rf %{buildroot}
 %defattr(-,root,root)
 %{_bindir}/*.pl
 %doc %{_docdir}/%{name}/*
-%dir %{_datadir}/X11/mandriva
-%{_datadir}/X11/mandriva/*
