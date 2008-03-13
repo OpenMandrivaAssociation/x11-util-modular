@@ -2,12 +2,12 @@ Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
 Version: 0.5
-Release: %mkrel 1
+Release: %mkrel 2
 Group: Development/X11
 ########################################################################
 # git clone git://anongit.freedesktop.org/xorg/util/modular xorg/util/modular
 # cd xorg/util/modular
-# git-archive --format=tar --prefix=%{name}-%{version}/ d58fd2e3668c8940d5d0ebe4b9b3057eee7aa5ce | bzip2 -9 > %{name}-%{version}.tar.bz2
+# git-archive --format=tar --prefix=%{name}-%{version}/ 2bbfb2fa6f7494485dfdbb6f26466b3734694f95 | bzip2 -9 > %{name}-%{version}.tar.bz2
 ########################################################################
 Source0: %{name}-%{version}.tar.bz2
 License: GPLv2+ and MIT
