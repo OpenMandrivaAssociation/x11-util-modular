@@ -1,7 +1,7 @@
 Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
-Version: 0.5
+Version: 0.0.2
 Release: %mkrel 2
 Group: Development/X11
 ########################################################################
