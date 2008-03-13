@@ -11,6 +11,7 @@ Group: Development/X11
 ########################################################################
 Source0: %{name}-%{version}.tar.bz2
 License: GPLv2+ and MIT
+BuildRoot: %{_tmppath}/%{name}-root
 
 Requires: perl sudo
 Requires: git-core cvs
