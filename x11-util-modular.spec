@@ -2,12 +2,12 @@ Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
 Version: 0.0.2
-Release: %mkrel 2
+Release: %mkrel 3
 Group: Development/X11
 ########################################################################
 # git clone git://anongit.freedesktop.org/xorg/util/modular xorg/util/modular
 # cd xorg/util/modular
-# git-archive --format=tar --prefix=%{name}-%{version}/ 2bbfb2fa6f7494485dfdbb6f26466b3734694f95 | bzip2 -9 > %{name}-%{version}.tar.bz2
+# git-archive --format=tar --prefix=x11-util-modular-0.0.2/ 8058ae402b953130afcc92ad7fbc49a0150f542c | bzip2 -9 > x11-util-modular-0.0.2.tar.bz2
 ########################################################################
 Source0: %{name}-%{version}.tar.bz2
 License: GPLv2+ and MIT
@@ -20,6 +20,7 @@ Requires: glibc-devel freetype2-devel
 Requires: strace wget
 
 Patch1: 0001-Add-a-set-of-scripts-to-allow-easier-build-of-xorg-l.patch
+Patch2: 0002-Update-to-latest-version-of-build-scripts.patch
 
 %description
 Scripts used for X.org package management.
@@ -28,6 +29,7 @@ Scripts used for X.org package management.
 %setup -q -n %{name}-%{version}
 
 %patch1 -p1
+%patch2 -p1
 
 %build
 
