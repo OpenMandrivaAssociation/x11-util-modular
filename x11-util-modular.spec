@@ -7,7 +7,7 @@ Group: Development/X11
 ########################################################################
 # git clone git://anongit.freedesktop.org/xorg/util/modular xorg/util/modular
 # cd xorg/util/modular
-# git-archive --format=tar --prefix=x11-util-modular-0.0.2/ 8058ae402b953130afcc92ad7fbc49a0150f542c | bzip2 -9 > x11-util-modular-0.0.2.tar.bz2
+# git-archive --format=tar --prefix=x11-util-modular-0.0.2/ a78aabbfdadafcc6fa802f6bf45c832e645bc191 | bzip2 -9 > x11-util-modular-0.0.2.tar.bz2
 ########################################################################
 Source0: %{name}-%{version}.tar.bz2
 License: GPLv2+ and MIT
@@ -19,8 +19,10 @@ Requires: make gcc bison flex autoconf
 Requires: glibc-devel freetype2-devel
 Requires: strace wget
 
+# git-format-patch a78aabbfdadafcc6fa802f6bf45c832e645bc191..patches
 Patch1: 0001-Add-a-set-of-scripts-to-allow-easier-build-of-xorg-l.patch
 Patch2: 0002-Update-to-latest-version-of-build-scripts.patch
+Patch2: 0003-Update-to-latest-build-scripts.patch
 
 %description
 Scripts used for X.org package management.
@@ -30,6 +32,7 @@ Scripts used for X.org package management.
 
 %patch1 -p1
 %patch2 -p1
+%patch3 -p1
 
 %build
 
