@@ -22,7 +22,7 @@ Requires: strace wget
 # git-format-patch a78aabbfdadafcc6fa802f6bf45c832e645bc191..patches
 Patch1: 0001-Add-a-set-of-scripts-to-allow-easier-build-of-xorg-l.patch
 Patch2: 0002-Update-to-latest-version-of-build-scripts.patch
-Patch2: 0003-Update-to-latest-build-scripts.patch
+Patch3: 0003-Update-to-latest-build-scripts.patch
 
 %description
 Scripts used for X.org package management.
