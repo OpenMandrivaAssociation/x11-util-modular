@@ -2,7 +2,7 @@ Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
 Version: 0.0.2
-Release: %mkrel 5
+Release: %mkrel 6
 Group: Development/X11
 ########################################################################
 # git clone git://anongit.freedesktop.org/xorg/util/modular xorg/util/modular
@@ -19,11 +19,12 @@ Requires: make gcc bison flex autoconf
 Requires: glibc-devel freetype2-devel
 Requires: strace wget
 
-# git-format-patch a78aabbfdadafcc6fa802f6bf45c832e645bc191..patches
+# git-format-patch master..patches
 Patch1: 0001-Add-a-set-of-scripts-to-allow-easier-build-of-xorg-l.patch
 Patch2: 0002-Update-to-latest-version-of-build-scripts.patch
 Patch3: 0003-Update-to-latest-build-scripts.patch
 Patch4: 0004-Update-for-rpm-build-and-current-git-master.patch
+Patch5: 0005-Update-rpm-build-to-match-Mandriva-cooker.patch
 
 %description
 Scripts used for X.org package management.
@@ -35,6 +36,7 @@ Scripts used for X.org package management.
 %patch2 -p1
 %patch3 -p1
 %patch4 -p1
+%patch5 -p1
 
 %build
 
