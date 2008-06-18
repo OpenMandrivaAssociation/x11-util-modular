@@ -2,7 +2,7 @@ Name: x11-util-modular
 BuildArch: noarch
 Summary: Set of scripts to manage modular X.org packages
 Version: 0.0.2
-Release: %mkrel 7
+Release: %mkrel 8
 Group: Development/X11
 ########################################################################
 # git clone git://anongit.freedesktop.org/xorg/util/modular xorg/util/modular
@@ -26,6 +26,7 @@ Patch3: 0003-Update-to-latest-build-scripts.patch
 Patch4: 0004-Update-for-rpm-build-and-current-git-master.patch
 Patch5: 0005-Update-rpm-build-to-match-Mandriva-cooker.patch
 Patch6: 0006-Update-script-to-build-a-xorg-snapshot-and-the-rpm-b.patch
+Patch7: 0007-Update-build-scripts-to-match-latest-build-requirem.patch
 
 %description
 Scripts used for X.org package management.
@@ -39,6 +40,7 @@ Scripts used for X.org package management.
 %patch4 -p1
 %patch5 -p1
 %patch6 -p1
+%patch7 -p1
 
 %build
 
