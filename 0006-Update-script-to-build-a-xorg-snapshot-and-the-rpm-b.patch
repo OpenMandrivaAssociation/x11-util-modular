@@ -1,0 +1,610 @@
+From a1106f2586dd48d27d939065a00a6a55749b56a9 Mon Sep 17 00:00:00 2001
+From: Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
+Date: Thu, 5 Jun 2008 18:18:23 -0300
+Subject: [PATCH] Update script to build a xorg-snapshot and the rpm build.
+
+---
+ xorg-scripts/xorg-build.pl |  235 ++++++++++++++++++++++++++++----------------
+ 1 files changed, 149 insertions(+), 86 deletions(-)
+
+diff --git a/xorg-scripts/xorg-build.pl b/xorg-scripts/xorg-build.pl
+index d5f88f2..c24f8fb 100755
+--- a/xorg-scripts/xorg-build.pl
++++ b/xorg-scripts/xorg-build.pl
+@@ -63,7 +63,7 @@ my %commands =
+ 
+ ##############################################################################
+ # Check -<letter> options and script command
+-Getopt::Std::getopts("n:lcdgvh?", \%options);
++Getopt::Std::getopts("n:lcdfgvh?", \%options);
+ $command = shift(@ARGV);
+ $command = $commands{$command};
+ if ($command eq "shell") {
+@@ -80,6 +80,7 @@ if (not $commands{$command} or $options{'h'} or $options{'?'}) {
+ 	  " -c      Start over update instead of from last failed repository.\n",
+ 	  " -d      Makes a debug build.\n",
+ 	  " -g      Generate dependency files (uses strace).\n",
++	  " -f      Force resubmission of a package.\n",
+ 	  " -v      Verbose mode.\n",
+ 	  " -n name Process only modules with given name.\n",
+ 	  " -h, -?  Prints this message and quits.\n",
+@@ -327,7 +328,6 @@ my $ac_buildaddr  = "--with-builder-addr="			.
+     ($rpm ? "\$USER\@\`hostname\`" : $git_user_email);
+ my $ac_builderstr;
+ my $ac_kvesa;
+-my $ac_mesapath	  = "--with-mesa-source=";
+ if ($rpm) {
+     $ac_kvesa	  = " \\
+ %ifarch %%{x86} alpha
+@@ -335,15 +335,13 @@ if ($rpm) {
+ %endif
+ ";
+     $ac_builderstr = "--with-builderstring=\"\`uname -onri | sed -e 's/ /_/g'\`\"";
+-    $ac_mesapath = "$ac_mesapath$final_destdir/src/Mesa";
+ }
+ else {
+     $ac_kvesa	   = $xorg_git_lib_name eq "lib" ? "" : "--enable-kdrive-vesa";
+     $ac_builderstr = `uname -a`; chomp($ac_builderstr); $ac_builderstr = "--with-builderstring=\"\\\"$ac_builderstr\\\"\"";
+-    $ac_mesapath = "$ac_mesapath$final_destdir/$xorg_git_build_dir/mesa/mesa";
+ }
+ my $ac_dga	  = "--enable-dga";
+-my $ac_dmx	  = "--enable-dmx";
++my $ac_dmx	  = "--disable-dmx";
+ my $ac_fontcache  = "--enable-fontcache";
+ my $ac_glx	  = "--enable-glx";
+ my $ac_glxtls	  = "--enable-glx-tls";
+@@ -354,7 +352,7 @@ my $ac_xace	  = "--enable-xace";
+ my $ac_xdmcp	  = "--enable-xdmcp";
+ my $ac_xdmauth	  = "--enable-xdm-auth-1";
+ my $ac_xephyr	  = "--enable-xephyr";
+-my $ac_xegl	  = "--enable-xegl";
++my $ac_xegl	  = "--disable-xegl";
+ my $ac_xf86misc	  = "--enable-xf86misc";
+ my $ac_xf86vid	  = "--enable-xf86vidmode";
+ my $ac_xfake	  = "--disable-xfake";
+@@ -376,6 +374,10 @@ my $ac_mkdep      = "MKDEP=$final_destdir/bin/gccmakedep";
+ my $ac_xincludes  = "--x-includes=$final_destdir/include/X11";
+ my $ac_xlibraries = "--x-libraries=$final_destdir/$xorg_git_lib_name";
+ 
++# drm kernel modules to build
++my @drm_modules = ("drm", "i810", "i915", "mach64", "mga", "r128", "radeon",
++		   "sis", "tdfx", "savage", "via", "xgi");
++
+ # xserver, mesa
+ my $ac_debug	  = "--enable-debug";
+ 
+@@ -383,7 +385,7 @@ my $ac_debug	  = "--enable-debug";
+ my $ac_motiflibs  = "--with-motif-libraries=no";
+ 
+ # compiz
+-my $ac_kde4	  = "--enable-kde4";
++my $ac_kde4	  = "--disable-kde --disable-kde4 --disable-kconfig";
+ my $ac_kconfig	  = $rpm ? "--disable-kconfig" : "";
+ my $ac_gnome	  = $rpm ? "--disable-gnome" : "";
+ 
+@@ -682,6 +684,7 @@ my @modules =
+      'version'	=> "1.1.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libxi",
++     'build'	=> ["xmlto"],
+  },
+  {
+      'name'	=> "libxkbfile",
+@@ -791,12 +794,8 @@ my @modules =
+      'package'	=> "mesa",
+      'build'	=> ["tcl", "texinfo", "libexpat-devel",
+ 		    "gccmakedep$package_suffix",
+-
+-		    # Hopefully a temporary only problem (cyclic dependency)
+-		    # due to libGLcore...
+-		    "xserver$package_suffix",
+ 		    "pixman$package_suffix",
+-		    "libpciaccess$package_suffix"
++		    "libpciaccess$package_suffix",
+ 		    ],
+  },
+  {
+@@ -944,7 +943,6 @@ my @modules =
+      'configure'=>
+      "$ac_buildaddr "	.
+      "$ac_builderstr "	.
+-     "$ac_mesapath "	.
+      "$ac_dga "		.
+      "$ac_dmx "		.
+      "$ac_fontcache "	.
+@@ -975,13 +973,19 @@ my @modules =
+      'build'	=> ["libpam-devel", "libgpm-devel", "SDL-devel",
+ 		    "libgii-devel", "libhal-devel", "libdbus-devel",
+ 		    "openssl-devel", "bison", "flex",
+-		    "mesa$package_suffix-source",
+ 		    # verify -- required by configure
+ 		    "libxres$package_suffix",
+-		    "dmxproto$package_suffix", "libdmx$package_suffix"],
++		    "dmxproto$package_suffix", "libdmx$package_suffix",
++		    "libSDL-devel" ],
+      'requires'	=> ["libpciaccess$package_suffix",],
+  },
+  {
++     'name'	=> "xprint",
++     'path'	=> "xorg",
++     'version'	=> "1.5.99.1",
++     'skip'	=> "yes",
++ },
++ {
+      'name'	=> "libXprintUtil",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+@@ -998,6 +1002,7 @@ my @modules =
+ 		    "freetype2-devel", "docbook-utils", "docbook-utils-pdf",
+ 		    "docbook-dtd31-sgml", "docbook-dtd41-sgml",
+ 		    "libxml2-devel", "libxml2-utils"],
++     'skip'	=> "Not used in Mandriva repositories",
+  },
+  {
+      'name'	=> "windowswmproto",
+@@ -1091,6 +1096,7 @@ my @modules =
+      'version'	=> "2.1.12",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libxft",
++     'build'	=> ["fontconfig-devel"],
+  },
+  {
+      'name'	=> "libFS",
+@@ -1191,6 +1197,8 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
+      'package'	=> "font-xfree86-type1",
++     'build'	=> ["fontconfig-devel",
++		    "mkfontdir$package_suffix", "mkfontscale$package_suffix"],
+  },
+  {
+      'name'	=> "winitzki-cyrillic",
+@@ -1233,6 +1241,8 @@ my @modules =
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
+      'package'	=> "font-misc-meltho",
++     'build'	=> ["fontconfig",
++		    "mkfontdir$package_suffix", "mkfontscale$package_suffix"],
+  },
+  {
+      'name'	=> "misc-ethiopic",
+@@ -1240,6 +1250,8 @@ my @modules =
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
+      'package'	=> "font-misc-ethiopic",
++     'build'	=> ["fontconfig",
++		    "mkfontdir$package_suffix", "mkfontscale$package_suffix"],
+  },
+  {
+      'name'	=> "misc-cyrillic",
+@@ -1275,6 +1287,8 @@ my @modules =
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
+      'package'	=> "font-ibm-type1",
++     'build'	=> ["fontconfig",
++		    "mkfontdir$package_suffix", "mkfontscale$package_suffix"],
+  },
+  {
+      'name'	=> "encodings",
+@@ -1317,6 +1331,8 @@ my @modules =
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
+      'package'	=> "font-bitstream-type1",
++     'build'	=> ["fontconfig",
++		    "mkfontdir$package_suffix", "mkfontscale$package_suffix"],
+  },
+  {
+      'name'	=> "bitstream-speedo",
+@@ -1345,6 +1361,8 @@ my @modules =
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
+      'package'	=> "font-bh-type1",
++     'build'	=> ["fontconfig",
++		    "mkfontdir$package_suffix", "mkfontscale$package_suffix"],
+  },
+  {
+      'name'	=> "bh-ttf",
+@@ -1352,6 +1370,8 @@ my @modules =
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
+      'package'	=> "font-bh-ttf",
++     'build'	=> ["fontconfig",
++		    "mkfontdir$package_suffix", "mkfontscale$package_suffix"],
+  },
+  {
+      'name'	=> "bh-lucidatypewriter-75dpi",
+@@ -1478,6 +1498,7 @@ my @modules =
+      'path'	=> "xorg/driver",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skpip'	=> "vermilion.h:92: error: expected specifier-qualifier-list before 'pciVideoPtr'",
+      'package'	=> "xf86-video-vermilion",
+  },
+  {
+@@ -1626,6 +1647,7 @@ my @modules =
+      'version'	=> "1.2.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-radeonhd",
++     'build'	=> ["pciutils-devel"]
+  },
+  {
+      'name'	=> "xf86-video-r128",
+@@ -1647,7 +1669,6 @@ my @modules =
+      'path'	=> "xorg/driver",
+      'version'	=> "2.8.3",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+-     'skip'	=> "not building - nsc_driver.c:503: error: 'pciVideoPtr' undeclared (first use in this function)",
+      'package'	=> "xf86-video-nsc",
+  },
+  {
+@@ -1812,7 +1833,7 @@ my @modules =
+      'path'	=> "xorg/driver",
+      'version'	=> "2.7.7.7",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+-     #     'skip'	=> "amd_gx_driver.c:331: error: 'pciVideoRec' undeclared (first use in this function)",
++     'skip'	=> "amd_gx_driver.c:331: error: 'pciVideoRec' undeclared (first use in this function)",
+      'package'	=> "xf86-video-amd",
+  },
+  {
+@@ -1849,6 +1870,7 @@ my @modules =
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-input-summa",
++     'skip'	=> "xf86Summa.c:1173: error: too many arguments to function 'InitValuatorClassDeviceStruct'",
+  },
+  {
+      'name'	=> "xf86-input-spaceorb",
+@@ -2440,6 +2462,7 @@ my @modules =
+      'version'	=> "1.1.7",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xdm",
++     'build'	=> ["fontconfig"],
+  },
+  {
+      'name'	=> "xditview",
+@@ -2734,6 +2757,7 @@ my @modules =
+ 		    "libxslt-devel", "libxslt-proc", "librsvg-devel",
+ 		    "libcairo-devel", "libsvg-cairo-devel",
+ 		    "libdbus-qt-1-devel", "fuse-devel", "intltool"],
++     'requires'	=> ["libxcb$package_suffix",],
+  },
+  {
+      'name'	=> "bitmap",
+@@ -2788,6 +2812,8 @@ my @modules =
+      # Fixme tarball
+      'package'	=> "xf86-video-avivo",
+      'requires'	=> "libpciaccess$package_suffix",
++     ## actually broken compilation only
++     'skip'	=> "../include/avivo.h:184: error: expected specifier-qualifier-list before 'pciVideoPtr'",
+  },
+ 
+ 
+@@ -2917,6 +2943,7 @@ sub checkout {
+ 	 $package->{'name'},
+ 	 $package->{'commit'});
+ 
++    my $cvs = undef;
+     my $command;
+     my $prefix = ($path ne "" ? "$path/" : "") . $name;
+ 
+@@ -2925,7 +2952,7 @@ sub checkout {
+ 	x_chdir($prefix);
+ 
+ 	# Special case
+-	if ($name eq "xkeyboard-config") {
++	if ($cvs) {
+ 	    $command = "cvs up";
+ 	}
+ 	else {
+@@ -2943,7 +2970,7 @@ sub checkout {
+     }
+     else {
+ 	# Special case
+-	if ($name eq "xkeyboard-config") {
++	if ($cvs) {
+ 	    x_system("cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name login");
+ 	    x_system("cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name co $commit $name");
+ 	}
+@@ -2969,6 +2996,7 @@ sub update {
+ 
+     x_system("echo -n $path/$name > $git_last_update");
+ 
++    my $cvs = undef;
+     my $command;
+     my $prefix = ($path ne "" ? "$path/" : "") . $name;
+ 
+@@ -2977,7 +3005,7 @@ sub update {
+ 	x_chdir($prefix);
+ 
+ 	# Special case
+-	if ($name eq "xkeyboard-config") {
++	if ($cvs) {
+ 	    $command = "cvs up";
+ 	}
+ 	else {
+@@ -2999,7 +3027,7 @@ sub update {
+     }
+     else {
+ 	# Special case
+-	if ($name eq "xkeyboard-config") {
++	if ($cvs) {
+ 	    x_system("cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name login");
+ 	    $command = "cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name co $package->{commit} $name";
+ 	}
+@@ -3059,11 +3087,15 @@ sub build {
+ 
+ 	my $arguments = " --prefix=$xorg_git_dest_dir --cache-file=$auto_cache_file $configure";
+ 
+-	if (-f "Makefile") {
+-	    x_system("make distclean");
+-	}
+-	if ($options{'g'}) {
+-	    x_system("rm -f $name.{deps,files}{,.ext}");
++	# options{c} means continue for git clone and also used as a hint
++	# to build to not restart from scratch.
++	if (undef($options{'c'})) {
++	    if (-f "Makefile") {
++		x_system("make distclean");
++	    }
++	    if ($options{'g'}) {
++		x_system("rm -f $name.{deps,files}{,.ext}");
++	    }
+ 	}
+ 
+ 	if (-f "autogen.sh") {
+@@ -3083,16 +3115,6 @@ sub build {
+ 		 ($options{'g'} ? "-i " : "")		.
+ 		 "make install", 1);
+ 
+-	# more Mesa
+-	if ($name eq "mesa") {
+-	    x_system("$trace "				.
+-		     ($options{'g'} ? "-l " : "")	.
+-		     "xorg-build.log make glcore", 1);
+-	    x_system("$xorg_git_sudo_command $trace "	.
+-		     ($options{'g'} ? "-i " : "")	.
+-		     "make glcore-install", 1);
+-	}
+-
+ 	if ($options{'g'}) {
+ 	    x_system("$xorg_git_sudo_command mkdir -p $xorg_git_deps_dir/$path");
+ 	    foreach my $ext ("deps", "files", "deps.ext", "files.ext") {
+@@ -3222,8 +3244,10 @@ sub rpm {
+ 	 $module->{'configure'},
+ 	 $module->{'package'});
+ 
++    my $cvs = undef;
+     my $SILENT = "";
+-    my $summary = $name eq "xkeyboard-config" ?
++    my $release = 1;
++    my $summary = $cvs ?
+ 	"cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name" :
+ 	"git clone git://anongit.freedesktop.org/git/$path/$name";
+ 
+@@ -3268,7 +3292,23 @@ sub rpm {
+ 
+     x_chdir("$xorg_git_checkout_dir/$path/$name");
+ 
+-    if ($name ne "xkeyboard-config") {
++    if ($cvs) {
++    	$version = 0;
++    	open(LOG, "cvs log |");
++    	while (<LOG>) {
++    	    if (m/date:\s+(\d+-\d+-\d+)/) {
++    		$_ = $1;
++    		s/-//g;
++    		# Not checking utc
++    		if ($_+0 > $version) {
++    		    $version = $_+0;
++    		}
++    	    }
++    	}
++    	$commit = $version;
++    	close(LOG);
++    }
++    else {
+ 	$tmp = $/;
+ 	$/ = undef;
+ 	# Was using head -3, but that causes problems with Merges in last commit
+@@ -3281,45 +3321,26 @@ sub rpm {
+ 	$version = $1;
+ 	$version =~ s/-//g;
+     }
+-    else {
+-	$version = 0;
+-	open(LOG, "cvs log |");
+-	while (<LOG>) {
+-	    if (m/date:\s+(\d+-\d+-\d+)/) {
+-		$_ = $1;
+-		s/-//g;
+-		# Not checking utc
+-		if ($_+0 > $version) {
+-		    $version = $_+0;
+-		}
+-	    }
+-	}
+-	$commit = $version;
+-	close(LOG);
+-    }
+ 
+     if ($version <= $old_version or ($commit and $commit eq $old_commit)) {
+ 	# Check build requires, as if build requires changed, this
+ 	# package could still require a rebuild.
++	return unless (defined($options{'f'}));
+ 
+-	return;
++	$release = `head -4 $xorg_git_rpm_dir/$package/SPECS/$package.spec | tail -1 | sed -e 's/Release: %mkrel //'`;
++	$release = $release+0 + 1 if ($options{'f'});
+     }
+ 
+-    if ($name ne "xkeyboard-config") {
+-	x_system("git-archive --format=tar --prefix=$package/ master | bzip2 > $package.tar.bz2");
+-	if ($name eq "mesa") {
+-	    x_system("mkdir ../Mesa");
+-	    x_system("for f in `find . -name \*.c -o -name \*.h`; do install -D \$f ../Mesa/\$f; done");
+-	    x_system("cd ..; tar jcf mesa-source.tar.bz2 Mesa; rm -fr Mesa; mv *.tar.bz2 mesa");
+-	}
+-    }
+-    else {
++    if ($cvs) {
+ 	x_chdir("..");
+ 	x_system("cp -far $name $package");
+ 	x_system("tar jcf $package.tar.bz2 $package");
+ 	x_system("rm -fr $package");
+ 	x_system("mv $package.tar.bz2 $name");
+     }
++    else {
++	x_system("git-archive --format=tar --prefix=$package/ master | bzip2 > $package.tar.bz2");
++    }
+ 
+     x_chdir("$xorg_git_rpm_dir/$package");
+ 
+@@ -3328,14 +3349,11 @@ sub rpm {
+     print(SPEC "#$version:$commit\n");
+     print(SPEC "Name: $package\n");
+     print(SPEC "Version: $version\n");
+-    print(SPEC "Release: %mkrel 4\n");
++    print(SPEC "Release: %mkrel $release\n");
+     print(SPEC "Summary: $summary\n");
+     print(SPEC "Group: System/X11\n");
+     print(SPEC "URL: http://xorg.freedesktop.org\n");
+     print(SPEC "Source: $package.tar.bz2\n");
+-    if ($name eq "mesa") {
+-	print(SPEC "Source1: mesa-source.tar.bz2\n");
+-    }
+     print(SPEC "License: MIT\n");
+     print(SPEC "BuildRoot: %{_tmppath}/%{name}-root\n");
+ 
+@@ -3344,7 +3362,9 @@ sub rpm {
+     }
+ 
+     foreach (@{$rpm_build_requires{$rpmname}}) {
+-	print(SPEC "BuildRequires: $_$package_suffix\n");
++	print(SPEC "BuildRequires: $_$package_suffix\n")
++	    # Don't build a fontconfig snapshot package anymore on Mandriva
++	    unless ($_ eq "fontconfig");
+     }
+     foreach (@{$module->{'build'}}) {
+ 	print(SPEC "BuildRequires: $_\n");
+@@ -3353,14 +3373,13 @@ sub rpm {
+ 	print(SPEC "Requires: $_\n");
+     }
+ 
+-    my $make = $name eq "libXtst" or $name eq "xorg-docs" ? "make" : "%make";
++    # Check for those that aren't "parallel" building
++    # This should be revied from time to time...
++    my $make = "make";
++    $make = "\%$make" unless ($name =~ m/^(libXtst|xorg-docs|mesa)$/);
+     my $makeinstall = "%makeinstall_std";
+ 
+-    if ($name eq "mesa") {
+-	$make = "$make\nmake glcore";
+-	$makeinstall = "$makeinstall glcore-install";
+-    }
+-    elsif ($package =~ /^font-/) {
++    if ($package =~ /^font-/) {
+ 	$makeinstall = "$makeinstall\nrm -f \`find %{buildroot} -type f -name fonts.dir -o -name fonts.scale\`\n";
+     }
+ 
+@@ -3396,11 +3415,28 @@ sub rpm {
+ 
+     if ($name eq "mesa") {
+ 	print(SPEC "\n%ifnarch %{sparc}\nrm -f %{buildroot}/$package_destdir/lib/dri/ffb_dri.so\n%endif\n");
+-	print(SPEC "pushd %{buildroot}\nmkdir -p %{buildroot}/$package_destdir/src\n");
+-	print(SPEC "cd %{buildroot}/$package_destdir/src\ntar jxf %{SOURCE1}\npopd\n");
++    }
++    elsif ($name eq "drm") {
++	print(SPEC "DRMDIR=%{_usrsrc}/%{name}-dkms\n");
++	print(SPEC "mkdir -p %{buildroot}\$DRMDIR\n");
++	print(SPEC "ln -s \$DRMDIR %{buildroot}\$DRMDIR-%{version}\n");
++	print(SPEC "cp -favr shared-core linux-core scripts %{buildroot}\$DRMDIR\n");
++	print(SPEC "cat > %{buildroot}\$DRMDIR/dkms.conf <<EOF\n");
++	print(SPEC "PACKAGE_NAME=\"%{name}-dkms\"\n");
++	print(SPEC "PACKAGE_VERSION=\"%{version}\"\n");
++	print(SPEC "MAKE[0]=\"make -C linux-core LINUXDIR=\\\$kernel_source_dir\"\n");
++	print(SPEC "CLEAN=\"make -C linux-core clean\"\n");
++	print(SPEC "AUTOINSTALL=YES\n");
++	for (my $i = 0; $i < @drm_modules; $i++) {
++	    print(SPEC "BUILT_MODULE_NAME[$i]=\"@drm_modules[$i]\"\n");
++	    print(SPEC "BUILT_MODULE_LOCATION[$i]=\"linux-core\"\n");
++	    print(SPEC "DEST_MODULE_LOCATION[$i]=\"/kernel/drivers/char/drm\"\n");
++	}
++	print(SPEC "EOF\n");
+     }
+ 
+-    print(SPEC "\n%clean\nrm -rf %{buildroot}\n\n%files\n%defattr(-,root,root)\n");
++    print(SPEC "\n%clean\nrm -rf %{buildroot}\n");
++    print(SPEC "\n%files\n%defattr(-,root,root)\n");
+ 
+     if ($name eq "libXaw") {
+ 	print(SPEC "$package_destdir/lib/libXaw.so*\n");
+@@ -3429,6 +3465,10 @@ sub rpm {
+ 	    m/dri\/(i810|s3v|sis|trident)_dri\.so/) {
+ 	    print(SPEC "%ifarch %{ix86}\n$_%endif\n");
+ 	}
++	elsif ($name eq "mesa" and
++	    m/dri\/ffb_dri\.so/) {
++	    print(SPEC "%ifarch %{sparc}\n$_%endif\n");
++	}
+ 	elsif ($name eq "xserver") {
+ 	    if (m/bin\/X(ati|chips|i810|mach64|mga|nvidia|pm2|r128|smi|vesa|via)?$/) {
+ 		print(SPEC "%ifarch %{ix86} alpha\n$_%endif\n");
+@@ -3450,24 +3490,47 @@ sub rpm {
+ 	}
+     }
+     close(FILES);
++    ## Symlinks should really be handled in xorg-trace.pl...
+     if ($name eq "xserver") {
+ 	print(SPEC "$package_destdir/bin/X\n$package_destdir/bin/in*\n");
+ 	print(SPEC "$package_destdir/bin/out*\n");
+     }
+-    elsif ($name eq  "mesa") {
+-	print(SPEC "\n%package source\nSummary: Mesa source files required to compile the X Server\n");
+-	print(SPEC "Group: Development/C\n\n");
+-	print(SPEC "%description source\n");
+-	print(SPEC "Mesa is an OpenGL 2+ compatible 3D graphics library.\n\n");
+-	print(SPEC "Source files required to compile the X Server.\n\n");
+-	print(SPEC "%files source\n%defattr(-,root,root)\n");
+-	print(SPEC "$package_destdir/src/*\n");
++    elsif ($name eq "fontconfig") {
++	print(SPEC "$package_destdir/etc/fonts/conf.d/*\n");
++    }
++    elsif ($name eq "xf86-video-intel") {
++	print(SPEC "$package_destdir/lib/xorg/modules/drivers/i810_drv.so\n");
+     }
+     elsif ($name eq "xkeyboard-config") {
+ 	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg\n");
+ 	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg.lst\n");
+ 	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg.xml\n");
+     }
++    elsif ($name eq "drm") {
++	print(SPEC "\n%package dkms\nSummary: Kernel drm modules\n");
++	print(SPEC "Group: Development/C\n\n");
++	print(SPEC "%description dkms\n");
++	print(SPEC "Kernel drm modules.\n\n");
++	print(SPEC "These modules are the latest development version.\n\n");
++	print(SPEC "Requires: dkms\n");
++	print(SPEC "Requires(post): dkms\n");
++	print(SPEC "Requires(preun): dkms\n");
++
++	print(SPEC "\n%post dkms\n");
++	print(SPEC "dkms add     -m %{name}-dkms -v %{version} --rpm_safe_upgrade &&\n");
++	print(SPEC "dkms build   -m %{name}-dkms -v %{version} --rpm_safe_upgrade &&\n");
++	print(SPEC "dkms install -m %{name}-dkms -v %{version} --rpm_safe_upgrade --force\n");
++	print(SPEC "rmmod ", join(" ", @drm_modules), " nvidia fglrx &>/dev/null\n");
++	print(SPEC "true\n");
++	print(SPEC "\n%preun dkms\n");
++	print(SPEC "dkms remove  -m %{name}-dkms -v %{version} --rpm_safe_upgrade --all\n");
++	print(SPEC "rmmod ", join(" ", @drm_modules), " nvidia fglrx &>/dev/null\n");
++	print(SPEC "true\n");
++
++	print(SPEC "\n%files dkms\n%defattr(-,root,root)\n");
++	print(SPEC "%{_usrsrc}/%{name}-dkms-%{version}\n");
++	print(SPEC "%{_usrsrc}/%{name}-dkms/*\n");
++    }
+ 
+     close(SPEC);
+ 
+-- 
+1.5.6
+

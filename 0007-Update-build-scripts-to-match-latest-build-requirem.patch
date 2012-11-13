@@ -1,0 +1,1115 @@
+From 542305176e8b760f85f0012bdbbe2923e771cc45 Mon Sep 17 00:00:00 2001
+From: Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
+Date: Wed, 18 Jun 2008 17:03:46 -0300
+Subject: [PATCH] Update build scripts, to match latest build requirements.
+
+---
+ xorg-scripts/xorg-build.pl |  643 +++++++++++++++++++++++++++++---------------
+ xorg-scripts/xorg-deps.pl  |    2 +-
+ 2 files changed, 425 insertions(+), 220 deletions(-)
+
+diff --git a/xorg-scripts/xorg-build.pl b/xorg-scripts/xorg-build.pl
+index c24f8fb..fe1e6fa 100755
+--- a/xorg-scripts/xorg-build.pl
++++ b/xorg-scripts/xorg-build.pl
+@@ -49,9 +49,6 @@ my %commands =
+  "co"		=> "checkout",
+  "checkout"	=> "checkout",
+  "build"	=> "build",
+- "clean"	=> "clean",
+- "realclean"	=> "realclean",
+- "distclean"	=> "distclean",
+  "checktars"	=> "checktars",
+  "checktarballs"=> "checktars",
+  "sh"		=> "shell",
+@@ -63,7 +60,7 @@ my %commands =
+ 
+ ##############################################################################
+ # Check -<letter> options and script command
+-Getopt::Std::getopts("n:lcdfgvh?", \%options);
++Getopt::Std::getopts("n:lcdfgvhp:?", \%options);
+ $command = shift(@ARGV);
+ $command = $commands{$command};
+ if ($command eq "shell") {
+@@ -83,14 +80,12 @@ if (not $commands{$command} or $options{'h'} or $options{'?'}) {
+ 	  " -f      Force resubmission of a package.\n",
+ 	  " -v      Verbose mode.\n",
+ 	  " -n name Process only modules with given name.\n",
++	  " -p name Process only modules with given package name.\n",
+ 	  " -h, -?  Prints this message and quits.\n",
+ 	  "Commands:\n",
+ 	  " update         Updates source checkouts.\n",
+ 	  " checkout       Create build directory.\n",
+ 	  " build          Rebuild module.\n",
+-	  " clean          Only remove $build_ok file.\n",
+-	  " realclean      Runs \"make clean realclean\".\n",
+-	  " distclean      Runs \"make clean distclean\".\n",
+ 	  " checktarballs  Checks if package tarball is available upstream.\n",
+ 	  " shell command  Executes <command> in checkout/build directory.\n",
+ 
+@@ -175,6 +170,8 @@ if ($xorg_git_lib_name eq "") {
+ }
+ 
+ # Example: sudo or empty string
++#### Was broken "Tue Jun 10 2008" for mesa because it would rebuild some
++#### up to date libraries in make install...
+ my $xorg_git_sudo_command = git_config("xorg-git.sudo-command");
+ if ($xorg_git_sudo_command eq "") {
+     if ($options{'v'}) {
+@@ -344,40 +341,40 @@ my $ac_dga	  = "--enable-dga";
+ my $ac_dmx	  = "--disable-dmx";
+ my $ac_fontcache  = "--enable-fontcache";
+ my $ac_glx	  = "--enable-glx";
+-my $ac_glxtls	  = "--enable-glx-tls";
+ my $ac_kdrive	  = "--enable-kdrive";
+-my $ac_mfb	  = "--enable-mfb";
+ my $ac_log_dir	  = "--with-log-dir=$final_destdir/var/log";
+ my $ac_xace	  = "--enable-xace";
+ my $ac_xdmcp	  = "--enable-xdmcp";
+ my $ac_xdmauth	  = "--enable-xdm-auth-1";
+ my $ac_xephyr	  = "--enable-xephyr";
+-my $ac_xegl	  = "--disable-xegl";
+ my $ac_xf86misc	  = "--enable-xf86misc";
+ my $ac_xf86vid	  = "--enable-xf86vidmode";
+ my $ac_xfake	  = "--disable-xfake";
+ my $ac_xfbdev	  = "--enable-xfbdev";
+-my $ac_xgl	  = "--disable-xgl";
+-my $ac_xglx	  = "--enable-xglx";
+ my $ac_xorg	  = "--enable-xorg";
+ my $ac_xorgcfg	  = "--enable-xorgcfg";
+ my $ac_xsdl	  = "--enable-xsdl";
+ my $ac_xselinux	  = "--disable-xselinux";
+ my $ac_xvfb	  = "--enable-xvfb";
+ 
++# drm kernel modules to build
++my @drm_modules = ("drm", "i810", "i915", "mach64", "mga",
++		   "r128", "radeon", "sis", "tdfx", "savage", "via");
++
++my $ac_glxtls	  = "--disable-glx-tls";
++
+ # mesa
++my $ac_demos	  = "--with-demos=yes";
+ my $ac_mesadriver = "--with-driver=dri";
+ my $ac_mesadridir = "--with-dri-driverdir=$final_destdir/$xorg_git_lib_name/dri";
+ my $ac_mkdep      = "MKDEP=$final_destdir/bin/gccmakedep";
++my $ac_ttm	  = "--enable-ttm-api";
++my $ac_x	  = "--with-x";
+ 
+ # mesa
+ my $ac_xincludes  = "--x-includes=$final_destdir/include/X11";
+ my $ac_xlibraries = "--x-libraries=$final_destdir/$xorg_git_lib_name";
+ 
+-# drm kernel modules to build
+-my @drm_modules = ("drm", "i810", "i915", "mach64", "mga", "r128", "radeon",
+-		   "sis", "tdfx", "savage", "via", "xgi");
+-
+ # xserver, mesa
+ my $ac_debug	  = "--enable-debug";
+ 
+@@ -406,6 +403,22 @@ my $xorg_url	= "http://xorg.freedesktop.org/releases/individual";
+ my $xorg_util	= "util";
+ 
+ 
++my %branches =
++(
++    'branch-gem'	=>
++    {
++	'packages'	=> ["libdrm", "mesa", "xf86-video-intel"],
++    },
++    'branch-stable'	=>
++    {
++	'packages'	=> ["libdrm", "mesa", "xserver"],
++    },
++    'branch-glucose'	=>
++    {
++	'packages'	=> ["xserver"],
++    },
++);
++
+ my @modules =
+ (
+  {
+@@ -451,6 +464,13 @@ my @modules =
+      'package'	=> "libxdmcp",
+  },
+  {
++     'name'	=> "pthread-stubs",
++     'path'	=> "xcb",
++     'version'	=> "0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/libpthread-stubs-%{version}$tgz",
++     'package'	=> "pthread-stubs",
++ },
++ {
+      'name'	=> "proto",
+      'path'	=> "xcb",
+      'version'	=> "1.1",
+@@ -487,13 +507,6 @@ my @modules =
+      'package'	=> "xf86bigfontproto",
+  },
+  {
+-     'name'	=> "pthread-stubs",
+-     'path'	=> "xcb",
+-     'version'	=> "0.1",
+-     'tarball'	=> "$xorg_url/$xorg_lib/libpthread-stubs-%{version}$tgz",
+-     'package'	=> "pthread-stubs",
+- },
+- {
+      'name'	=> "libxcb",
+      'path'	=> "xcb",
+      'version'	=> "1.1",
+@@ -523,6 +536,7 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'configure'=> "$ac_xcb",
+      'package'	=> "libx11",
++     'requires'	=> ["libxcb$package_suffix"],
+  },
+  {
+      'name'	=> "libXt",
+@@ -558,6 +572,7 @@ my @modules =
+      'version'	=> "3.5.7",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libxpm",
++     'requires'	=> ["libxcb$package_suffix"],
+  },
+  {
+      'name'	=> "libXp",
+@@ -602,20 +617,6 @@ my @modules =
+      'package'	=> "libxfixes",
+  },
+  {
+-     'name'	=> "damageproto",
+-     'path'	=>"xorg/proto",
+-     'version'	=> "1.1.0",
+-     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "damageproto",
+- },
+- {
+-     'name'	=> "xf86vidmodeproto",
+-     'path'	=>"xorg/proto",
+-     'version'	=> "2.2.2",
+-     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "xf86vidmodeproto",
+- },
+- {
+      'name'	=> "compositeproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "0.4",
+@@ -630,6 +631,13 @@ my @modules =
+      'package'	=> "libxrender",
+  },
+  {
++     'name'	=> "damageproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "damageproto",
++ },
++ {
+      'name'	=> "xineramaproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.1.2",
+@@ -644,49 +652,6 @@ my @modules =
+      'package'	=> "randrproto",
+  },
+  {
+-     'name'	=> "glproto",
+-     'path'	=>"xorg/proto",
+-     'version'	=> "1.4.9",
+-     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "glproto",
+- },
+- {
+-     'name'	=> "libXdamage",
+-     'path'	=> "xorg/lib",
+-     'version'	=> "1.1.1",
+-     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+-     'package'	=> "libxdamage",
+- },
+- {
+-     'name'	=> "dri2proto",
+-     'path'	=>"xorg/proto",
+-     'version'	=> "1.0.0",
+-     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "dri2proto",
+- },
+- {
+-     'name'	=> "drm",
+-     'path'	=> "mesa",
+-     'version'	=> "2.3.0",
+-     'tarball'	=> "http://dri.freedesktop.org/libdrm/libdrm-%{version}$tgz",
+-     'package'	=> "libdrm",
+- },
+- {
+-     'name'	=> "libXxf86vm",
+-     'path'	=> "xorg/lib",
+-     'version'	=> "1.0.1",
+-     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+-     'package'	=> "libxxf86vm",
+- },
+- {
+-     'name'	=> "libXi",
+-     'path'	=> "xorg/lib",
+-     'version'	=> "1.1.3",
+-     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+-     'package'	=> "libxi",
+-     'build'	=> ["xmlto"],
+- },
+- {
+      'name'	=> "libxkbfile",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.5",
+@@ -738,6 +703,21 @@ my @modules =
+      'package'	=> "libxcursor",
+  },
+  {
++     'name'	=> "libXdamage",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxdamage",
++ },
++ {
++     'name'	=> "libXi",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.1.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxi",
++     'build'	=> ["xmlto"],
++ },
++ {
+      'name'	=> "libXinerama",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.3",
+@@ -752,51 +732,46 @@ my @modules =
+      'package'	=> "libxrandr",
+  },
+  {
+-     'name'	=> "recordproto",
++     'name'	=> "xf86miscproto",
+      'path'	=>"xorg/proto",
+-     'version'	=> "1.13.2",
++     'version'	=> "0.9.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "recordproto",
++     'package'	=> "xf86miscproto",
+  },
+  {
+-     'name'	=> "xf86miscproto",
++     'name'	=> "xf86vidmodeproto",
+      'path'	=>"xorg/proto",
+-     'version'	=> "0.9.2",
++     'version'	=> "2.2.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "xf86miscproto",
++     'package'	=> "xf86vidmodeproto",
+  },
+  {
+-     'name'	=> "makedepend",
+-     'path'	=> "xorg/util",
+-     'version'	=> "1.0.1",
+-     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
+-     'package'	=> "makedepend",
++     'name'	=> "dmxproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "2.2.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "dmxproto",
+  },
+  {
+-     'name'	=> "gccmakedep",
+-     'path'	=> "xorg/util",
++     'name'	=> "resourceproto",
++     'path'	=>"xorg/proto",
+      'version'	=> "1.0.2",
+-     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
+-     'package'	=> "gccmakedep",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "resourceproto",
+  },
+  {
+-     'name'	=> "mesa",
+-     'path'	=> "mesa",
+-     'version'	=> "7.0.3",
+-     # Fixme tarball
+-     'configure'=>
+-     "$ac_mesadriver "	.
+-     "$ac_mesadridir "	.
+-     "$ac_mkdep "	.
+-     "$ac_xincludes "	.
+-     "$ac_xlibraries "	.
+-     ($options {'d'} ? "$ac_debug" : ""),
+-     'package'	=> "mesa",
+-     'build'	=> ["tcl", "texinfo", "libexpat-devel",
+-		    "gccmakedep$package_suffix",
+-		    "pixman$package_suffix",
+-		    "libpciaccess$package_suffix",
+-		    ],
++     'name'	=> "recordproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.13.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "recordproto",
++ },
++ {
++     'name'	=> "glproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.4.9",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "glproto",
+  },
+  {
+      'name'	=> "xf86driproto",
+@@ -813,13 +788,6 @@ my @modules =
+      'package'	=> "libxkbui",
+  },
+  {
+-     'name'	=> "resourceproto",
+-     'path'	=>"xorg/proto",
+-     'version'	=> "1.0.2",
+-     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "resourceproto",
+- },
+- {
+      'name'	=> "evieproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.2",
+@@ -841,11 +809,11 @@ my @modules =
+      'package'	=> "bigreqsproto",
+  },
+  {
+-     'name'	=> "dmxproto",
++     'name'	=> "dri2proto",
+      'path'	=>"xorg/proto",
+-     'version'	=> "2.2.2",
++     'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "dmxproto",
++     'package'	=> "dri2proto",
+  },
+  {
+      'name'	=> "scrnsaverproto",
+@@ -899,19 +867,18 @@ my @modules =
+      'package'	=> "pixman",
+  },
+  {
+-     'name'	=> "libXtst",
++     'name'	=> "libXxf86misc",
+      'path'	=> "xorg/lib",
+-     'version'	=> "1.0.3",
++     'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+-     'package'	=> "libxtst",
+-     'build'	=> ["xmlto"],
++     'package'	=> "libxxf86misc",
+  },
+  {
+-     'name'	=> "libXxf86misc",
++     'name'	=> "libXxf86vm",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+-     'package'	=> "libxxf86misc",
++     'package'	=> "libxxf86vm",
+  },
+  {
+      ## XXX Possible cyclic dependency.
+@@ -936,6 +903,15 @@ my @modules =
+      'package'	=> "libxres",
+  },
+  {
++     'name'	=> "libXtst",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxtst",
++     'build'	=> ["xmlto"],
++ },
++
++ {
+      'name'	=> "xserver",
+      'path'	=> "xorg",
+      'version'	=> "1.5.99.901",
+@@ -947,8 +923,6 @@ my @modules =
+      "$ac_dmx "		.
+      "$ac_fontcache "	.
+      "$ac_glx "		.
+-     "$ac_glxtls "	.
+-     "$ac_mfb "		.
+      "$ac_kdrive "	.
+      "$ac_kvesa "	.
+      "$ac_log_dir "	.
+@@ -956,13 +930,10 @@ my @modules =
+      "$ac_xdmcp "	.
+      "$ac_xdmauth "	.
+      "$ac_xephyr "	.
+-     "$ac_xegl "	.
+      "$ac_xf86misc "	.
+      "$ac_xf86vid "	.
+      "$ac_xfake "	.
+      "$ac_xfbdev "	.
+-     "$ac_xgl "		.
+-     "$ac_xglx "	.
+      "$ac_xorg "	.
+      "$ac_xorgcfg "	.
+      "$ac_xsdl "	.
+@@ -979,6 +950,159 @@ my @modules =
+ 		    "libSDL-devel" ],
+      'requires'	=> ["libpciaccess$package_suffix",],
+  },
++
++ {
++     'name'	=> "glitz",
++     'path'	=> "",
++     'version'	=> "0.5.6",
++     'tarball'	=> "http://cairographics.org/snapshots/%{name}-{%version}$tgz",
++     'package'	=> "libglitz",
++     'skip'	=> "used only by glucose",
++ },
++
++ {
++     'name'	=> "xserver",
++     'path'	=> "xorg",
++     'configure'=>
++     "$ac_buildaddr "	.
++     "$ac_builderstr "	.
++     "$ac_dga "		.
++     "$ac_dmx "		.
++     "$ac_fontcache "	.
++     "$ac_glx "		.
++     "$ac_glxtls "	.
++     "$ac_kdrive "	.
++     "$ac_kvesa "	.
++     "$ac_log_dir "	.
++     "$ac_xace "	.
++     "$ac_xdmcp "	.
++     "$ac_xdmauth "	.
++     "$ac_xephyr "	.
++     "$ac_xf86misc "	.
++     "$ac_xf86vid "	.
++     "$ac_xfake "	.
++     "$ac_xfbdev "	.
++     "$ac_xorg "	.
++     "$ac_xorgcfg "	.
++     "$ac_xsdl "	.
++     "$ac_xselinux "	.
++     "$ac_xvfb "	.
++     ($options{'d'} ? "$ac_debug" : ""),
++     'commit'	=> "origin/server-1.5-branch",
++     'package'	=> "xserver-branch-stable",
++     'build'	=> ["libpam-devel", "libgpm-devel", "SDL-devel",
++		    "libgii-devel", "libhal-devel", "libdbus-devel",
++		    "openssl-devel", "bison", "flex",
++		    # verify -- required by configure
++		    "libxres$package_suffix",
++		    "dmxproto$package_suffix", "libdmx$package_suffix",
++		    "libSDL-devel" ],
++     'requires'	=> ["libpciaccess$package_suffix",],
++ },
++
++ {
++     'name'	=> "xserver",
++     'path'	=> "xorg",
++     'configure'=>
++     "$ac_buildaddr "	.
++     "$ac_builderstr "	.
++     "$ac_fontcache "	.
++     "$ac_glx "		.
++     "$ac_glxtls "	.
++     "$ac_log_dir "	.
++     "$ac_xdmcp "	.
++     "$ac_xdmauth "	.
++     ($options{'d'} ? "$ac_debug" : ""),
++     'commit'	=> "origin/glucose-2",
++     'package'	=> "xserver-branch-glucose",
++     'build'	=> ["libpam-devel", "libgpm-devel", "SDL-devel",
++		    "libgii-devel", "libhal-devel", "libdbus-devel",
++		    "openssl-devel", "bison", "flex",
++		    # verify -- required by configure
++		    "libxres$package_suffix",
++		    "dmxproto$package_suffix", "libdmx$package_suffix",
++		    "libSDL-devel" ],
++     'requires'	=> ["libpciaccess$package_suffix",],
++     'skip'	=> "not building",
++ },
++
++ {
++     'name'	=> "drm",
++     'path'	=> "mesa",
++     'commit'	=> "origin/drm-gem",
++     'package'	=> "libdrm-branch-gem",
++ },
++ {
++     'name'	=> "drm",
++     'path'	=> "mesa",
++     'version'	=> "2.3.0",
++     'tarball'	=> "http://dri.freedesktop.org/libdrm/libdrm-%{version}$tgz",
++     'package'	=> "libdrm",
++ },
++
++ {
++     'name'	=> "makedepend",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
++     'package'	=> "makedepend",
++ },
++ {
++     'name'	=> "gccmakedep",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
++     'package'	=> "gccmakedep",
++ },
++
++ {
++     'name'	=> "mesa",
++     'path'	=> "mesa",
++     'version'	=> "7.0.3",
++     # Fixme tarball
++     'configure'=>
++     "$ac_demos "	.
++     "$ac_glxtls "	.
++     "$ac_mesadriver "	.
++     "$ac_mesadridir "	.
++     "$ac_mkdep "	.
++     "$ac_ttm "		.
++     "$ac_x "		.
++     "$ac_xincludes "	.
++     "$ac_xlibraries "	.
++     ($options {'d'} ? "$ac_debug" : ""),
++     'package'	=> "mesa",
++     'build'	=> ["tcl", "texinfo", "libexpat-devel",
++		    "gccmakedep$package_suffix",
++		    "pixman$package_suffix",
++		    "libpciaccess$package_suffix",
++		    ],
++ },
++ {
++     'name'	=> "mesa",
++     'path'	=> "mesa",
++     # Fixme tarball
++     'configure'=>
++     "$ac_demos "	.
++     "$ac_glxtls "	.
++     "--with-dri-drivers=swrast,i915,i965 " .
++     "$ac_mesadriver "	.
++     "$ac_mesadridir "	.
++     "$ac_mkdep "	.
++     "$ac_ttm "		.
++     "$ac_x "		.
++     "$ac_xincludes "	.
++     "$ac_xlibraries "	.
++     ($options {'d'} ? "$ac_debug" : ""),
++     'commit'	=> "origin/drm-gem",
++     'package'	=> "mesa-branch-gem",
++     'build'	=> ["tcl", "texinfo", "libexpat-devel",
++		    "gccmakedep$package_suffix",
++		    "pixman$package_suffix",
++		    "libpciaccess$package_suffix",
++		    ],
++ },
++
+  {
+      'name'	=> "xprint",
+      'path'	=> "xorg",
+@@ -1089,6 +1213,7 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libxprintapputil",
++     'requires'	=> ["libxprintutil$package_suffix"],
+  },
+  {
+      'name'	=> "libXft",
+@@ -1707,6 +1832,14 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-intel",
+  },
++
++ {
++     'name'	=> "xf86-video-intel",
++     'path'	=> "xorg/driver",
++     'commit'	=> "origin/drm-gem",
++     'package'	=> "xf86-video-intel-branch-gem",
++ },
++
+  {
+      'name'	=> "xf86-video-imstt",
+      'path'	=> "xorg/driver",
+@@ -2117,7 +2250,7 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xsm",
+-     # Shouldn't really need it to build from source...
++	 # Shouldn't really need it to build from source...
+      'build'	=> ["rsh"],
+  },
+  {
+@@ -2211,6 +2344,8 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xplsprinters",
++     'requires'	=> ["libxprintutil$package_suffix",
++		    "libxprintapputil$package_suffix"],
+  },
+  {
+      'name'	=> "xphelloworld",
+@@ -2219,7 +2354,8 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'configure'=> "$ac_motiflibs",
+      'package'	=> "xphelloworld",
+-     'requires'	=> ["libxprintapputil$package_suffix"],
++     'requires'	=> ["libxprintutil$package_suffix",
++		    "libxprintapputil$package_suffix"],
+  },
+  {
+      'name'	=> "xmore",
+@@ -2227,6 +2363,8 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xmore",
++     'requires'	=> ["libxprintutil$package_suffix",
++		    "libxprintapputil$package_suffix"],
+  },
+  {
+      'name'	=> "xmodmap",
+@@ -2253,6 +2391,7 @@ my @modules =
+      'name'	=> "xman",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
++     'configure'=> "--disable-xprint",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xman",
+  },
+@@ -2288,6 +2427,7 @@ my @modules =
+      'name'	=> "xlogo",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
++     'configure'=> "--disable-xprint",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xlogo",
+  },
+@@ -2798,6 +2938,14 @@ my @modules =
+      'tarball'	=> "http://xcb.freedesktop.org/dist/%{path}-%{name}-%{version}$tgz",
+      'package'	=> "xcb-demo",
+  },
++
++ {
++     'name'	=> "mesa",
++     'path'	=> "nouveau",
++     'commit'	=> "origin/gallium-0.1",
++     'package'	=> "xf86-video-nouveau-mesa",
++ },
++
+  {
+      'name'	=> "xf86-video-nouveau",
+      'path'	=> "nouveau",
+@@ -2805,6 +2953,7 @@ my @modules =
+      # Fixme tarball
+      'package'	=> "xf86-video-nouveau",
+  },
++
+  {
+      'name'	=> "xf86-video-avivo",
+      'path'	=> "avivo",
+@@ -2946,10 +3095,21 @@ sub checkout {
+     my $cvs = undef;
+     my $command;
+     my $prefix = ($path ne "" ? "$path/" : "") . $name;
++    my $checkout = $commit;
++    my $branch;
++
++    if ($checkout =~ m/origin/) {
++	$checkout =~ s/^origin\///;
++	$branch = $checkout;
++	$checkout = "$prefix-$checkout";
++    }
++    else {
++	$checkout = $prefix;
++    }
+ 
+     x_chdir($xorg_git_build_dir);
+-    if (-d $prefix) {
+-	x_chdir($prefix);
++    if (-d $checkout and not $commit) {
++	x_chdir($checkout);
+ 
+ 	# Special case
+ 	if ($cvs) {
+@@ -2975,9 +3135,18 @@ sub checkout {
+ 	    x_system("cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name co $commit $name");
+ 	}
+ 	else {
+-	    x_system("git-clone file://$xorg_git_checkout_dir/$prefix $prefix");
++	    if ($branch) {
++		x_system("rm -fr $checkout");
++		x_chdir("$xorg_git_checkout_dir/$path/$name");
++		x_system("git branch -D $branch && git-gc");
++		x_system("git checkout origin/$branch");
++		x_system("git checkout -b $branch origin/$branch");
++		x_system("git checkout master");
++		x_chdir($xorg_git_build_dir);
++	    }
++	    x_system("git-clone $xorg_git_checkout_dir/$prefix $checkout");
+ 	    if ($commit ne "") {
+-		x_chdir($prefix);
++		x_chdir($checkout);
+ 		x_system("git-checkout $commit");
+ 	    }
+ 	}
+@@ -3074,14 +3243,21 @@ sub checktars {
+ sub build {
+     my ($package) = \%{$_};
+ 
+-    my ($path, $name, $configure) =
++    my ($path, $name, $configure, $commit) =
+ 	($package->{'path'},
+ 	 $package->{'name'},
+-	 $package->{'configure'});
++	 $package->{'configure'},
++	 $package->{'commit'});
+ 
+     my $trace = $options{'g'} ? $xorg_trace_pl : "";
++    $commit =~ s/^origin\///;
++    $name = "$name-$commit" if ($commit ne "");
+     my $full_path = "$xorg_git_build_dir/$path/$name";
+ 
++    #if ($commit) {
++	#x_system("rm -f $auto_cache_file");
++    #}
++
+     if (not -f "$full_path/$build_ok") {
+ 	x_chdir("$full_path");
+ 
+@@ -3102,18 +3278,33 @@ sub build {
+ 	    x_system("$trace ./autogen.sh $arguments");
+ 	}
+ 	# Mesa special case only?
+-	else {
++	elsif ($commit ne "gallium-0.1") {
+ 	    x_system("$trace make configure");
+ 	    x_system("$trace ./configure $arguments");
+ 	}
+ 
+-	x_system("$trace "						.
+-		 ($options{'g'} ? "-l xorg-build.log " : "")		.
+-		 "make", 1);
++	if ($name eq "mesa" and $commit eq "gallium-0.1") {
++	    $ENV{LIB_DIR}="$xorg_git_lib_name";
++	    $ENV{INCLUDE_DIR}="$xorg_git_dest_dir/include";
++	    $ENV{DRI_DRIVER_DIR}="$xorg_git_dest_dir/$xorg_git_lib_name/dri";
++	    x_system("$trace make $configure linux-dri");
++	}
++	else {
++	    x_system("$trace "						.
++		     ($options{'g'} ? "-l xorg-build.log " : "")	.
++		     "make", 1);
++	}
+ 
+-	x_system("$xorg_git_sudo_command $trace "	.
+-		 ($options{'g'} ? "-i " : "")		.
+-		 "make install", 1);
++	if ($name eq "mesa" and $commit eq "gallium-0.1") {
++	    x_system("$xorg_git_sudo_command $trace "	.
++		     ($options{'g'} ? "-i " : "")		.
++		     "make $configure install", 1);
++	}
++	else {
++	    x_system("$xorg_git_sudo_command $trace "	.
++		     ($options{'g'} ? "-i " : "")		.
++		     "make install", 1);
++	}
+ 
+ 	if ($options{'g'}) {
+ 	    x_system("$xorg_git_sudo_command mkdir -p $xorg_git_deps_dir/$path");
+@@ -3126,46 +3317,10 @@ sub build {
+ 
+ 	x_system("touch $build_ok");
+     }
+-};
+-
+-
+-##############################################################################
+-sub clean {
+-    my ($package) = \%{$_};
+-
+-    my ($path, $name) =
+-	($package->{'path'},
+-	 $package->{'name'});
+-
+-    x_system("rm -f $xorg_git_build_dir/$path/$name/$build_ok");
+-};
+-
+-
+-##############################################################################
+-sub realclean {
+-    my ($package) = \%{$_};
+-
+-    my ($path, $name) =
+-	($package->{'path'},
+-	 $package->{'name'});
+ 
+-    x_chdir("$xorg_git_build_dir/$path/$name");
+-    x_system("rm -f $build_ok");
+-    x_system("make realclean") if (-f "Makefile");
+-};
+-
+-
+-##############################################################################
+-sub distclean {
+-    my ($package) = \%{$_};
+-
+-    my ($path, $name) =
+-	($package->{'path'},
+-	 $package->{'name'});
+-
+-    x_chdir("$xorg_git_build_dir/$path/$name");
+-    x_system("rm -f $build_ok");
+-    x_system("make distclean") if (-f "Makefile");
++    #if ($commit) {
++	#x_system("rm -f $auto_cache_file");
++    #}
+ };
+ 
+ 
+@@ -3173,10 +3328,13 @@ sub distclean {
+ sub shell {
+     my ($package) = \%{$_};
+ 
+-    my ($path, $name) =
++    my ($path, $name, $commit) =
+ 	($package->{'path'},
+-	 $package->{'name'});
++	 $package->{'name'},
++	 $package->{'commit'});
+ 
++    $commit =~ s/^origin\///;
++    $name = "$name-$commit" if ($commit ne "");
+     x_chdir("$xorg_git_build_dir/$path/$name");
+     x_system($arguments);
+ };
+@@ -3194,8 +3352,13 @@ sub rpm_trans {
+ 
+     unless ($rpm_trans_table{$module}) {
+ 	foreach (@modules) {
+-	    if (($_->{'path'} ne "" and $module eq "$_->{'path'}/$_->{'name'}")
+-		or $_->{'name'} eq $module) {
++	    my $commit = $_->{'commit'};
++	    if ($commit =~ /^origin/) {
++		$commit =~ s/^origin\///;
++		$commit = "-$commit";
++	    }
++	    if (($_->{'path'} ne "" and $module eq "$_->{'path'}/$_->{'name'}$commit")
++		or "$_->{'name'}$commit" eq $module) {
+ 		$rpm_trans_table{$module} = $_->{'package'};
+ 		last;
+ 	    }
+@@ -3238,11 +3401,12 @@ sub rpm_init {
+ sub rpm {
+     my ($module) = \%{$_};
+ 
+-    my ($path, $name, $configure, $package) =
++    my ($path, $name, $configure, $package, $git_commit) =
+ 	($module->{'path'},
+ 	 $module->{'name'},
+ 	 $module->{'configure'},
+-	 $module->{'package'});
++	 $module->{'package'},
++	 $module->{'commit'});
+ 
+     my $cvs = undef;
+     my $SILENT = "";
+@@ -3339,7 +3503,7 @@ sub rpm {
+ 	x_system("mv $package.tar.bz2 $name");
+     }
+     else {
+-	x_system("git-archive --format=tar --prefix=$package/ master | bzip2 > $package.tar.bz2");
++	x_system("git-archive --format=tar --prefix=$package/ " . ($git_commit ? $git_commit : "master") . " | bzip2 > $package.tar.bz2");
+     }
+ 
+     x_chdir("$xorg_git_rpm_dir/$package");
+@@ -3361,10 +3525,31 @@ sub rpm {
+ 	print(SPEC "ExclusiveArch: %{ix86}\n");
+     }
+ 
+-    foreach (@{$rpm_build_requires{$rpmname}}) {
+-	print(SPEC "BuildRequires: $_$package_suffix\n")
++    $rpmname =~ /(branch.*)/;
++    if ($branches{$1}) {
++	my $suffix = $1;
++	my @packages = @{$branches{$suffix}{'packages'}};
++	foreach my $requires (@{$rpm_build_requires{$rpmname}}) {
+ 	    # Don't build a fontconfig snapshot package anymore on Mandriva
+-	    unless ($_ eq "fontconfig");
++	    next if ($requires eq "fontconfig");
++
++	    ## Ugly hack to compile with headers that define i915 symbols
++
++	    if ($rpmname eq "mesa-branch-stable" and $requires eq "libdrm") {
++		$requires = "libdrm-branch-gem";
++	    }
++	    elsif (grep($_ eq $requires, @packages)) {
++		$requires .= "-$suffix";
++	    }
++	    print(SPEC "BuildRequires: $requires$package_suffix\n");
++	}
++    }
++    else {
++	foreach (@{$rpm_build_requires{$rpmname}}) {
++	    # Don't build a fontconfig snapshot package anymore on Mandriva
++	    next if ($_ eq "fontconfig");
++	    print(SPEC "BuildRequires: $_$package_suffix\n");
++	}
+     }
+     foreach (@{$module->{'build'}}) {
+ 	print(SPEC "BuildRequires: $_\n");
+@@ -3398,7 +3583,7 @@ sub rpm {
+ 	print(SPEC "export PATH PKG_CONFIG_PATH LD_LIBRARY_PATH");
+     }
+     if ($name eq "xserver") {
+-	print(SPEC "CFLAGS=\"-DDEFAULT_CONF_PATH=\\\\\"\\\"$package_destdir/etc/X11\\\\\"\\\" -DROOT_CONFIGPATH=DEFAULT_CONF_PATH -DUSER_CONFIGPATH=DEFAULT_CONF_PATH\"\n");
++	print(SPEC "CFLAGS=\"-DDEFAULT_CONF_PATH=\\\\\"\\\"$package_destdir/etc/X11/xorg.conf\\\\\"\\\" -DROOT_CONFIGPATH=DEFAULT_CONF_PATH -DUSER_CONFIGPATH=DEFAULT_CONF_PATH\"\n");
+ 	print(SPEC "export CFLAGS\n");
+     }
+ 
+@@ -3417,22 +3602,33 @@ sub rpm {
+ 	print(SPEC "\n%ifnarch %{sparc}\nrm -f %{buildroot}/$package_destdir/lib/dri/ffb_dri.so\n%endif\n");
+     }
+     elsif ($name eq "drm") {
+-	print(SPEC "DRMDIR=%{_usrsrc}/%{name}-dkms\n");
++
++	print(SPEC "DRMDIR=%{_usrsrc}/dkms-%{name}\n");
+ 	print(SPEC "mkdir -p %{buildroot}\$DRMDIR\n");
+ 	print(SPEC "ln -s \$DRMDIR %{buildroot}\$DRMDIR-%{version}\n");
+ 	print(SPEC "cp -favr shared-core linux-core scripts %{buildroot}\$DRMDIR\n");
+ 	print(SPEC "cat > %{buildroot}\$DRMDIR/dkms.conf <<EOF\n");
+-	print(SPEC "PACKAGE_NAME=\"%{name}-dkms\"\n");
++	print(SPEC "PACKAGE_NAME=\"dkms-%{name}\"\n");
+ 	print(SPEC "PACKAGE_VERSION=\"%{version}\"\n");
+ 	print(SPEC "MAKE[0]=\"make -C linux-core LINUXDIR=\\\$kernel_source_dir\"\n");
+ 	print(SPEC "CLEAN=\"make -C linux-core clean\"\n");
+ 	print(SPEC "AUTOINSTALL=YES\n");
+-	for (my $i = 0; $i < @drm_modules; $i++) {
+-	    print(SPEC "BUILT_MODULE_NAME[$i]=\"@drm_modules[$i]\"\n");
++	my $i = 0;
++	foreach my $drm_module (@drm_modules) {
++	    next if ($git_commit eq "origin/drm-gem" && $drm_module eq "i810");
++	    print(SPEC "BUILT_MODULE_NAME[$i]=\"$drm_module\"\n");
+ 	    print(SPEC "BUILT_MODULE_LOCATION[$i]=\"linux-core\"\n");
+ 	    print(SPEC "DEST_MODULE_LOCATION[$i]=\"/kernel/drivers/char/drm\"\n");
++	    $i++;
+ 	}
+ 	print(SPEC "EOF\n");
++
++	# Avoid dkms build failure due to not being built from a git
++	# repository and/or git not available.
++	print(SPEC
++	      "perl -pi -e 's|^(GIT_REVISION :=)|\$1 ",
++	      `(cd $xorg_git_checkout_dir/$path/$name && echo -n \`git-describe --abbrev=17\`)`,
++	      "|' %{buildroot}\$DRMDIR/linux-core/Makefile");
+     }
+ 
+     print(SPEC "\n%clean\nrm -rf %{buildroot}\n");
+@@ -3445,8 +3641,12 @@ sub rpm {
+ 
+     # Replace "from source destdir" with package destdir, and leave a
+     # place to allow adding extra hooks on filename/path transformation.
+-    open(FILES, "$xorg_git_deps_dir/$path/$name.files")
+-	or die ("Cannot read $xorg_git_deps_dir/$path/$name.files\n");
++    if ($git_commit) {
++	$git_commit =~ s/^origin\///;
++	$git_commit = "-$git_commit";
++    }
++    open(FILES, "$xorg_git_deps_dir/$path/$name$git_commit.files")
++	or die ("Cannot read $xorg_git_deps_dir/$path/$name$git_commit.files\n");
+     while (<FILES>) {
+ 	s/^$xorg_git_dest_dir/$package_destdir/;
+ 	# It executes symlink("old", "new") using relative pathnames,
+@@ -3507,29 +3707,32 @@ sub rpm {
+ 	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg.xml\n");
+     }
+     elsif ($name eq "drm") {
+-	print(SPEC "\n%package dkms\nSummary: Kernel drm modules\n");
++	print(SPEC "\n%package -n dkms-%{name}\nSummary: Kernel drm modules\n");
+ 	print(SPEC "Group: Development/C\n\n");
+-	print(SPEC "%description dkms\n");
++	print(SPEC "%description -n dkms-%{name}\n");
+ 	print(SPEC "Kernel drm modules.\n\n");
+ 	print(SPEC "These modules are the latest development version.\n\n");
+ 	print(SPEC "Requires: dkms\n");
++
++	print(SPEC "Obsoletes: %{name}-dkms\n")	if ($rpmname eq "libdrm");
++
+ 	print(SPEC "Requires(post): dkms\n");
+ 	print(SPEC "Requires(preun): dkms\n");
+ 
+-	print(SPEC "\n%post dkms\n");
+-	print(SPEC "dkms add     -m %{name}-dkms -v %{version} --rpm_safe_upgrade &&\n");
+-	print(SPEC "dkms build   -m %{name}-dkms -v %{version} --rpm_safe_upgrade &&\n");
+-	print(SPEC "dkms install -m %{name}-dkms -v %{version} --rpm_safe_upgrade --force\n");
++	print(SPEC "\n%post -n dkms-%{name}\n");
++	print(SPEC "dkms add     -m dkms-%{name} -v %{version} --rpm_safe_upgrade &&\n");
++	print(SPEC "dkms build   -m dkms-%{name} -v %{version} --rpm_safe_upgrade &&\n");
++	print(SPEC "dkms install -m dkms-%{name} -v %{version} --rpm_safe_upgrade --force\n");
+ 	print(SPEC "rmmod ", join(" ", @drm_modules), " nvidia fglrx &>/dev/null\n");
+ 	print(SPEC "true\n");
+-	print(SPEC "\n%preun dkms\n");
+-	print(SPEC "dkms remove  -m %{name}-dkms -v %{version} --rpm_safe_upgrade --all\n");
++	print(SPEC "\n%preun -n dkms-%{name}\n");
++	print(SPEC "dkms remove  -m dkms-%{name} -v %{version} --rpm_safe_upgrade --all\n");
+ 	print(SPEC "rmmod ", join(" ", @drm_modules), " nvidia fglrx &>/dev/null\n");
+ 	print(SPEC "true\n");
+ 
+-	print(SPEC "\n%files dkms\n%defattr(-,root,root)\n");
+-	print(SPEC "%{_usrsrc}/%{name}-dkms-%{version}\n");
+-	print(SPEC "%{_usrsrc}/%{name}-dkms/*\n");
++	print(SPEC "\n%files -n dkms-%{name}\n%defattr(-,root,root)\n");
++	print(SPEC "%{_usrsrc}/dkms-%{name}-%{version}\n");
++	print(SPEC "%{_usrsrc}/dkms-%{name}/*\n");
+     }
+ 
+     close(SPEC);
+@@ -3589,9 +3792,6 @@ my %table = (
+     "update"	=>	\&update,
+     "checkout"	=>	\&checkout,
+     "build"	=>	\&build,
+-    "clean"	=>	\&clean,
+-    "realclean"	=>	\&realclean,
+-    "distclean"	=>	\&distclean,
+     "checktars"	=>	\&checktars,
+     "shell"	=>	\&shell,
+     "rpm"	=>	\&rpm,
+@@ -3611,6 +3811,11 @@ if ($options{'n'}) {
+ 	}
+     }
+ }
++if ($options{'p'}) {
++    foreach (@modules) {
++	$_->{'skip'} = "yes" unless ($_->{'package'} eq $options{'p'});
++    }
++}
+ #  Add skip for modules without a 'package' entry
+ if ($rpm) {
+     rpm_init() if ($command eq "rpm");
+@@ -3628,7 +3833,7 @@ if ($command eq "update" and not $options{'c'} and -f $git_last_update) {
+     }
+ }
+ foreach (@modules) {
+-    print(STDERR "--> $_->{name}\n") unless ($options{'n'});
++    print(STDERR "--> $_->{name} $_{commit}\n") unless ($options{'n'});
+     my $function = $table{$command};
+     $function->($_) unless ($_->{'skip'});
+ }
+diff --git a/xorg-scripts/xorg-deps.pl b/xorg-scripts/xorg-deps.pl
+index bb4eb07..5542536 100755
+--- a/xorg-scripts/xorg-deps.pl
++++ b/xorg-scripts/xorg-deps.pl
+@@ -148,4 +148,4 @@ if ($options{'p'}) {
+ }
+ else {
+     print_build_order();
+-}
+\ No newline at end of file
++}
+-- 
+1.5.6
+

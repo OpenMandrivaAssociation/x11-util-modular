@@ -1,0 +1,1179 @@
+From 784ccd037e5f2107eb1e36073e1690b1f47ef6c0 Mon Sep 17 00:00:00 2001
+From: Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
+Date: Wed, 16 Apr 2008 18:35:04 -0300
+Subject: [PATCH] Update to latest version of build scripts.
+
+---
+ xorg-scripts/xorg-build.pl    |  257 ++++++++++++++++++++++---------------
+ xorg-scripts/xorg-ext-deps.pl |  278 +++++++++++++++++++++++++++++++++++++++++
+ xorg-scripts/xorg-scripts.txt |    9 ++
+ xorg-scripts/xorg-trace.pl    |   75 +++++++++--
+ 4 files changed, 502 insertions(+), 117 deletions(-)
+ create mode 100755 xorg-scripts/xorg-ext-deps.pl
+
+diff --git a/xorg-scripts/xorg-build.pl b/xorg-scripts/xorg-build.pl
+index 7c4c8ba..5f8b738 100755
+--- a/xorg-scripts/xorg-build.pl
++++ b/xorg-scripts/xorg-build.pl
+@@ -28,6 +28,7 @@ use strict;
+ # Check command line options
+ my %options;
+ my $command = "";
++my $arguments = "";
+ 
+ # File name to know finished a build with no erros
+ my $build_ok = "xorg-build.ok";
+@@ -47,21 +48,22 @@ my %commands =
+  "distclean"	=> "distclean",
+  "checktars"	=> "checktars",
+  "checktarballs"=> "checktars",
++ "sh"		=> "shell",
++ "shell"	=> "shell",
+  );
+ 
+ 
+ ##############################################################################
+ # Check -<letter> options and script command
+-Getopt::Std::getopts("n:cdgvh?", \%options);
+-foreach (@ARGV) {
+-    if ($commands{$_}) {
+-	# XXX Use other method...
+-	# Cause an error if more than one command specified...
+-	$command .= $commands{$_};
+-    }
+-    else {
+-	print(STDERR "* Unknown command $_\n");
+-    }
++Getopt::Std::getopts("n:lcdgvh?", \%options);
++$command = shift(@ARGV);
++$command = $commands{$command};
++if ($command eq "shell") {
++    $arguments = join(" ", @ARGV);
++}
++elsif (@ARGV) {
++    # just to cause an error
++    $command = "";
+ }
+ if (not $commands{$command} or $options{'h'} or $options{'?'}) {
+     print(STDERR "Usage:\n",
+@@ -81,6 +83,7 @@ if (not $commands{$command} or $options{'h'} or $options{'?'}) {
+ 	  " realclean      Runs \"make clean realclean\".\n",
+ 	  " distclean      Runs \"make clean distclean\".\n",
+ 	  " checktarballs  Checks if package tarball is available upstream.\n",
++	  " shell command  Executes <command> in checkout/build directory.\n",
+ 	  "\n");
+     exit(0);
+ }
+@@ -91,9 +94,17 @@ die ("\$ENV{HOME} not set. Cannot continue.") unless ($ENV{HOME} ne "");
+ 
+ # Maybe -W options could be handled differently, but a debug build most
+ # certainly wants at least these...
+-$ENV{CFLAGS} = "-O0 -g3 -Wall -Wpointer-arith -Wstrict-prototypes " .
+-"-Wmissing-prototypes -Wmissing-declarations " .
+-"-Wnested-externs -fno-strict-aliasing" if ($options{'d'});
++$ENV{CFLAGS} = "-O0 -g3 "	.
++"-Wall "			.
++"-Wbad-function-cast "		.
++"-Wdeclaration-after-statement ".
++"-Wmissing-prototypes "		.
++"-Wmissing-declarations "	.
++"-Wnested-externs "		.
++"-fno-strict-aliasing "		.
++"-Wold-style-definition "	.
++"-Wpointer-arith "		.
++"-Wstrict-prototypes " if ($options{'d'});
+ 
+ # For error messages
+ $ENV{LC_ALL} = "C";
+@@ -192,7 +203,7 @@ if ($xorg_git_deps_dir eq "") {
+ 	print(STDERR "* Please consider running:\n",
+ 	      "\tgit-config --global xorg-git.deps-dir /path/to/install/dependencies\n");
+     }
+-    $xorg_git_deps_dir = "/usr/local/xorg/deps";
++    $xorg_git_deps_dir = "$ENV{HOME}/anongit.freedesktop.org/deps";
+ }
+ 
+ if ($options{'v'}) {
+@@ -228,10 +239,11 @@ if ($options{'g'}) {
+     $xorg_trace_pl = "/usr/bin/perl $xorg_trace_pl";
+ }
+ 
+-my $auto_cache_file = "$xorg_git_dest_dir/.cache";
++my $auto_cache_file = "$xorg_git_build_dir/.cache";
+ my $git_last_update = "$xorg_git_checkout_dir/xorg-update.tmp";
+ 
+-$ENV{PKG_CONFIG_PATH} = "$xorg_git_dest_dir/$xorg_git_lib_name/pkgconfig:$ENV{PKG_CONFIG_PATH}";
++my $pkgconfig_path =  "$xorg_git_dest_dir/$xorg_git_lib_name/pkgconfig";
++$ENV{PKG_CONFIG_PATH} = "$pkgconfig_path:$ENV{PKG_CONFIG_PATH}";
+ $ENV{LD_LIBRARY_PATH} = "$xorg_git_dest_dir/$xorg_git_lib_name:$ENV{LD_LIBRARY_PATH}";
+ $ENV{ACLOCAL_LOCALDIR} = "$xorg_git_dest_dir/share/aclocal";
+ $ENV{ACLOCAL} = "aclocal -I $ENV{ACLOCAL_LOCALDIR}";
+@@ -240,6 +252,12 @@ $ENV{ACLOCAL} = "aclocal -I $ENV{ACLOCAL_LOCALDIR}";
+ if (not -d $ENV{ACLOCAL_LOCALDIR}) {
+     x_system("$xorg_git_sudo_command mkdir -p $ENV{ACLOCAL_LOCALDIR}");
+ }
++# For some reason, some pkgconfig files were not being installed, and
++# it was messing with the dependencies or reading "system" files when
++# installing in a test directory.
++if (not -d $pkgconfig_path) {
++    x_system("$xorg_git_sudo_command mkdir -p $pkgconfig_path");
++}
+ 
+ $ENV{PATH} = "$xorg_git_dest_dir/bin:$ENV{PATH}";
+ 
+@@ -266,6 +284,7 @@ my $ac_xcb	  = "--with-xcb=yes";
+ 
+ # xserver
+ my $ac_buildaddr  = "--with-builder-addr=$git_user_email";
++my $ac_builderstr = `uname -a`; chomp($ac_builderstr); $ac_builderstr = "--with-builderstring=\"\\\"$ac_builderstr\\\"\"";
+ my $ac_mesapath	  = "--with-mesa-source=$xorg_git_build_dir/mesa/mesa";
+ my $ac_dga	  = "--enable-dga";
+ my $ac_dmx	  = "--enable-dmx";
+@@ -274,6 +293,8 @@ my $ac_glx	  = "--enable-glx";
+ my $ac_glxtls	  = "--enable-glx-tls";
+ my $ac_kdrive	  = "--enable-kdrive";
+ my $ac_kvesa	  = "--enable-kdrive-vesa";
++my $ac_mfb	  = "--enable-mfb";
++my $ac_log_dir	  = "--with-log-dir=/var/log";
+ my $ac_xace	  = "--enable-xace";
+ my $ac_xdmcp	  = "--enable-xdmcp";
+ my $ac_xdmauth	  = "--enable-xdm-auth-1";
+@@ -332,6 +353,12 @@ my @modules =
+      'skip'	=> "yes",
+  },
+  {
++     'name'	=> "macros",
++     'path'	=> "xorg/util",
++     'version'	=> "1.1.6",
++     'tarball'	=> "$xorg_url/$xorg_util/util-%{name}-%{version}$tgz",
++ },
++ {
+      'name'	=> "x11proto",
+      'path'	=>"xorg/proto",
+      'version'	=> "7.0.12",
+@@ -359,7 +386,7 @@ my @modules =
+      'name'	=> "proto",
+      'path'	=> "xcb",
+      'version'	=> "1.1",
+-     # Fixme tarball
++     'tarball'	=> "http://xcb.freedesktop.org/dist/%{path}-%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "libICE",
+@@ -529,6 +556,12 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
++     'name'	=> "dri2proto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
+      'name'	=> "drm",
+      'path'	=> "mesa",
+      'version'	=> "2.3.0",
+@@ -602,11 +635,24 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
++     'name'	=> "recordproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.13.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
+      'name'	=> "xf86miscproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "0.9.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+  },
++ { # XXX mesa Makefiles seems to be using the one in default search path
++     'name'	=> "makedepend",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.1",
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
+  {
+      'name'	=> "mesa",
+      'path'	=> "mesa",
+@@ -646,7 +692,7 @@ my @modules =
+  {
+      'name'	=> "libXv",
+      'path'	=> "xorg/lib",
+-     'version'	=> "1.0.3",
++     'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
+@@ -662,12 +708,6 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+  },
+  {
+-     'name'	=> "recordproto",
+-     'path'	=>"xorg/proto",
+-     'version'	=> "1.13.2",
+-     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+- },
+- {
+      'name'	=> "scrnsaverproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.1.0",
+@@ -710,32 +750,35 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
+-     'name'	=> "libXxf86misc",
++     'name'	=> "libXtst",
+      'path'	=> "xorg/lib",
+-     'version'	=> "1.0.1",
++     'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
+-     'name'	=> "macros",
+-     'path'	=> "xorg/util",
+-     'version'	=> "1.1.6",
+-     'tarball'	=> "$xorg_url/$xorg_util/util-%{name}-%{version}$tgz",
++     'name'	=> "libXxf86misc",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xserver",
+      'path'	=> "xorg",
+-     'version'	=> "1.4.99.901",
++     'version'	=> "1.5.99.901",
+      'tarball'	=> "$xorg_url/xserver/xorg-server-%{version}$tgz",
+      'configure'=>
+      "$ac_buildaddr "	.
++     "$ac_builderstr "	.
+      "$ac_mesapath "	.
+      "$ac_dga "		.
+      "$ac_dmx "		.
+      "$ac_fontcache "	.
+      "$ac_glx "		.
+      "$ac_glxtls "	.
++     "$ac_mfb "		.
+      "$ac_kdrive "	.
+      "$ac_kvesa "	.
++     "$ac_log_dir "	.
+      "$ac_xace "	.
+      "$ac_xdmcp "	.
+      "$ac_xdmauth "	.
+@@ -785,6 +828,12 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+  },
+  {
++     'name'	=> "mkfontdir",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
+      'name'	=> "mkfontscale",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.4",
+@@ -863,20 +912,14 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
+-     'name'	=> "libXtst",
+-     'path'	=> "xorg/lib",
+-     'version'	=> "1.0.3",
+-     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+- },
+- {
+      'name'	=> "libdmx",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
+-     'path'	=> "xorg/lib",
+      'name'	=> "liblbxutil",
++     'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+@@ -887,6 +930,12 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+  },
+  {
++     'name'	=> "util",
++     'path'	=> "xcb",
++     'version'	=> "0.2",
++     # Fixme tarball
++ },
++ {
+      'name'	=> "lndir",
+      'path'	=> "xorg/util",
+      'version'	=> "1.0.1",
+@@ -1172,7 +1221,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-vmware",
+      'path'	=> "xorg/driver",
+-     'version'	=> "10.15.2",
++     'version'	=> "10.16.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1203,7 +1252,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-tseng",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1221,7 +1270,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-tdfx",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.3.0",
++     'version'	=> "1.4.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1281,31 +1330,31 @@ my @modules =
+  {
+      'name'	=> "xf86-video-siliconmotion",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.5.1",
++     'version'	=> "1.6.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-video-savage",
+      'path'	=> "xorg/driver",
+-     'version'	=> "2.1.3",
++     'version'	=> "2.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-video-s3virge",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.9.1",
++     'version'	=> "1.10.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-video-s3",
+      'path'	=> "xorg/driver",
+-     'version'	=> "0.5.0",
++     'version'	=> "0.6.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-video-rendition",
+      'path'	=> "xorg/driver",
+-     'version'	=> "4.1.3",
++     'version'	=> "4.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1332,6 +1381,7 @@ my @modules =
+      'path'	=> "xorg/driver",
+      'version'	=> "2.8.3",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "not building - nsc_driver.c:503: error: 'pciVideoPtr' undeclared (first use in this function)",
+  },
+  {
+      'name'	=> "xf86-video-newport",
+@@ -1342,7 +1392,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-neomagic",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1394,14 +1444,13 @@ my @modules =
+  {
+      'name'	=> "xf86-video-i128",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.2.1",
++     'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+-     'skip'	=> "not building - i128accel.c:38:24: error: xf86_ansic.h: No such file or directory /// i128.h:37: error: expected specifier-qualifier-list before 'pciVideoPtr'",
+  },
+  {
+      'name'	=> "xf86-video-glint",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1414,13 +1463,13 @@ my @modules =
+  {
+      'name'	=> "xf86-video-fbdev",
+      'path'	=> "xorg/driver",
+-     'version'	=> "0.3.1",
++     'version'	=> "0.4.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-video-dummy",
+      'path'	=> "xorg/driver",
+-     'version'	=> "0.2.0",
++     'version'	=> "0.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1433,13 +1482,13 @@ my @modules =
+  {
+      'name'	=> "xf86-video-cirrus",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-video-chips",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1451,19 +1500,19 @@ my @modules =
+  {
+      'name'	=> "xf86-video-ast",
+      'path'	=> "xorg/driver",
+-     'version'	=> "0.81.0",
++     'version'	=> "0.85.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-video-ark",
+      'path'	=> "xorg/driver",
+-     'version'	=> "0.6.0",
++     'version'	=> "0.7.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-video-apm",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1482,7 +1531,7 @@ my @modules =
+  {
+      'name'	=> "xf86-input-vmmouse",
+      'path'	=> "xorg/driver",
+-     'version'	=> "12.4.3",
++     'version'	=> "12.5.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1494,13 +1543,13 @@ my @modules =
+  {
+      'name'	=> "xf86-input-tek4957",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-summa",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1512,31 +1561,31 @@ my @modules =
+  {
+      'name'	=> "xf86-input-penmount",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.2.1",
++     'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-palmax",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-mutouch",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-mouse",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.2.3",
++     'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-microtouch",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1548,13 +1597,13 @@ my @modules =
+  {
+      'name'	=> "xf86-input-magellan",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-keyboard",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.2.2",
++     'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1566,19 +1615,19 @@ my @modules =
+  {
+      'name'	=> "xf86-input-jamstudio",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-hyperpen",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-fpit",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1590,7 +1639,7 @@ my @modules =
+  {
+      'name'	=> "xf86-input-elographics",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1602,19 +1651,19 @@ my @modules =
+  {
+      'name'	=> "xf86-input-dynapro",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-dmc",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+      'name'	=> "xf86-input-digitaledge",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.1.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -1626,7 +1675,7 @@ my @modules =
+  {
+      'name'	=> "xf86-input-calcomp",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+  },
+  {
+@@ -2142,12 +2191,6 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+  },
+  {
+-     'name'	=> "mkfontdir",
+-     'path'	=> "xorg/app",
+-     'version'	=> "1.0.4",
+-     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+- },
+- {
+      'name'	=> "mkcomposecache",
+      'path'	=> "xorg/app",
+      'version'	=> "1.2",
+@@ -2237,7 +2280,7 @@ my @modules =
+  {
+      'name'	=> "compiz",
+      'path'	=> "xorg/app",
+-     'version'	=> "0.7.2",
++     'version'	=> "0.7.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}.tar.gz",
+  },
+  {
+@@ -2267,12 +2310,6 @@ my @modules =
+      'configure'=> "$ac_xkbcomplnk $ac_xkbrules $ac_xkbruleslnk",
+  },
+  {
+-     'name'	=> "util",
+-     'path'	=> "xcb",
+-     'version'	=> "0.2",
+-     # Fixme tarball
+- },
+- {
+      'name'	=> "demo",
+      'path'	=> "xcb",
+      'version'	=> "0.1",
+@@ -2287,7 +2324,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-avivo",
+      'path'	=> "avivo",
+-     'version'	=> "0.0.1",
++     'version'	=> "0.0.999",
+      # Fixme tarball
+  },
+ 
+@@ -2343,7 +2380,7 @@ my @modules =
+      'name'	=> "edid-decode",
+      'path'	=> "xorg/app",
+      # Fixme tarball
+-     'skip'	=> "yes",
++     #'skip'	=> "yes",
+  },
+  {
+      'name'	=> "makepsres",
+@@ -2371,13 +2408,6 @@ my @modules =
+      'skip'	=> "yes",
+  },
+  {
+-     'name'	=> "makedepend",
+-     'path'	=> "xorg/util",
+-     'version'	=> "1.0.2",
+-     # Fixme tarball
+-     'skip'	=> "yes",
+- },
+- {
+      'name'	=> "xmkmf",
+      'path'	=> "xorg/util",
+      # No files
+@@ -2568,7 +2598,7 @@ sub build {
+ 	    x_system("make distclean");
+ 	}
+ 	if ($options{'g'}) {
+-	    x_system("rm -f $name.deps $name.files");
++	    x_system("rm -f $name.{deps,files}{,.ext}");
+ 	}
+ 
+ 	if (-f "autogen.sh") {
+@@ -2581,16 +2611,21 @@ sub build {
+ 	    x_system("$trace ./configure $arguments");
+ 	}
+ 
+-	x_system("$trace make", 1);
++	x_system("$trace "				.
++		 ($options{'g'} ? "-l " : "")		.
++		 "xorg-build.log make", 1);
+ 
+-	# XXX
+-	$trace .= $options{'g'} ? " -i" : "";
+-	x_system("$xorg_git_sudo_command $trace make install", 1);
++	x_system("$xorg_git_sudo_command $trace "	.
++		 ($options{'g'} ? "-i " : "")		.
++		 "make install", 1);
+ 
+ 	if ($options{'g'}) {
+ 	    x_system("$xorg_git_sudo_command mkdir -p $xorg_git_deps_dir/$path");
+-	    x_system("$xorg_git_sudo_command /bin/sh -c \"cat $name.deps | sort | uniq > $xorg_git_deps_dir/$path/$name.deps\"");
+-	    x_system("$xorg_git_sudo_command /bin/sh -c \"cat $name.files | sort | uniq > $xorg_git_deps_dir/$path/$name.files\"");
++	    foreach my $ext ("deps", "files", "deps.ext", "files.ext") {
++		x_system("$xorg_git_sudo_command "			.
++			 "/bin/sh -c \"cat $name.$ext | sort | uniq > "	.
++			 "$xorg_git_deps_dir/$path/$name.$ext\"");
++	    }
+ 	}
+ 
+ 	x_system("touch $build_ok");
+@@ -2639,6 +2674,19 @@ sub distclean {
+ 
+ 
+ ##############################################################################
++sub shell {
++    my ($package) = \%{$_};
++
++    my ($path, $name) =
++	($package->{'path'},
++	 $package->{'name'});
++
++    x_chdir("$xorg_git_build_dir/$path/$name");
++    x_system($arguments);
++};
++
++
++##############################################################################
+ # Replace hash values with macros in the format %{string} to $module->{'string'}
+ #   Only one pass and no specific order
+ sub replace_macros_and_check_errors {
+@@ -2682,6 +2730,7 @@ my %table = (
+     "realclean"	=>	\&realclean,
+     "distclean"	=>	\&distclean,
+     "checktars"	=>	\&checktars,
++    "shell"	=>	\&shell,
+ );
+ 
+ #  Add skip for -n option
+diff --git a/xorg-scripts/xorg-ext-deps.pl b/xorg-scripts/xorg-ext-deps.pl
+new file mode 100755
+index 0000000..510515e
+--- /dev/null
++++ b/xorg-scripts/xorg-ext-deps.pl
+@@ -0,0 +1,278 @@
++#!/usr/bin/perl
++
++##############################################################################
++#  Copyright (C) 2008 Paulo Cesar Pereira de Andrade.  All Rights Reserved.
++#
++#  This is free software; you can redistribute it and/or modify
++#  it under the terms of the GNU General Public License as published by
++#  the Free Software Foundation; either version 2 of the License, or
++#  (at your option) any later version.
++#
++#  This software is distributed in the hope that it will be useful,
++#  but WITHOUT ANY WARRANTY; without even the implied warranty of
++#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#  GNU General Public License for more details.
++#
++#  Authors:
++#	Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
++##############################################################################
++
++use Cwd;
++use Getopt::Std;
++
++use strict;
++
++my %options;
++
++my @pkgconfig =
++(
++ "atk",
++ "audiofile",
++ "avahi-client",
++ "avahi-glib",
++ "cairo",
++ "cairo-ft",
++ "cairo-xlib",
++ "cairo-xlib-xrender",
++ "dbus-1",
++ "dbus-glib-1",
++ "direct",
++ "directfb",
++ "esound",
++ "freetype2",
++ "gail",
++ "gamin",
++ "gconf-2.0",
++ "gdk-2.0",
++ "gdk-pixbuf-2.0",
++ "gdk-pixbuf-xlib-2.0",
++ "gdk-x11-2.0",
++ "glib-2.0",
++ "gmodule-2.0",
++ "gmodule-no-export-2.0",
++ "gnome-desktop-2.0",
++ "gnome-keyring-1",
++ "gnome-vfs-2.0",
++ "gnome-window-settings-2.0",
++ "gobject-2.0",
++ "gthread-2.0",
++ "gtk+-2.0",
++ "gtk+-x11-2.0",
++ "hal",
++ "lcms",
++ "libart-2.0",
++ "libcroco-0.6",
++ "libcrypto",
++ "libglade",
++ "libgnome-2.0",
++ "libgnomecanvas-2.0",
++ "libgnome-menu",
++ "libgnomeui-2.0",
++ "libgsf-gnome-1",
++ "libmetacity-private",
++ "libpanelapplet-2.0",
++ "libpng12",
++ "librsvg-2.0",
++ "libssl",
++ "libstartup-notification-1.0",
++ "libusb",
++ "libwnck-1.0",
++ "libxml-2.0",
++ "libxslt",
++ "openssl",
++ "ORBit-2.0",
++ "pangocairo",
++ "pangoft2",
++ "pango",
++ "qt-mt",
++ "sdl",
++ );
++
++#   Some file to check, so that build should not fail at some
++# random point due to some missing requirement.
++my @binaries =
++(
++ "aclocal",
++ "ar",
++ "as",
++ "autoconf",
++ "c++",
++ "cc",
++ "cpp",
++ "dcopidl",		# compiz
++ "dcopidl2cpp", 	# compiz
++ "docbook2html",	# fontconfig
++ "docbook2man", 	# fontconfig
++ "docbook2pdf", 	# fontconfig
++ "docbook2txt", 	# fontconfig
++ "dot", 		# libxcb
++ "doxygen",		# libxcb
++ "ed",			# libXaw
++ "ld",
++ "lex",
++ "git",
++ "gperf",		# xcb/util
++ "grep",
++ "gzip",
++ "iconv",		# xkbeyboard-config, compiz
++ "intltoolize", 	# xkbeyboard-config, compiz
++ "jw",			# fontconfig
++ "kde-config",		# compiz
++ "lynx",		# fontconfig
++ "m4",
++ "make",
++ "msgfmt",		# xkbeyboard-config, compiz
++ "nm",			# libXau
++ "onsgmls",		# fontconfig
++ "openjade",		# fontconfig
++ "pkg-config",
++ "ranlib",
++ "sed",
++ "strip",
++ "tar",
++ "xgettext",
++ "xmllint",
++ "xmlto",
++ "xsltproc",
++ "yacc",
++ );
++
++my @files =
++(
++ "/etc/sgml/sgml.conf",
++ "/etc/sgml/catalog",
++ "/etc/xml/catalog",
++ "/usr/include/assert.h",
++ "/usr/include/ctype.h",
++ "/usr/include/dcopclient.h",
++ "/usr/include/regex.h",
++ "/usr/include/rpc/rpc.h",
++ "/usr/include/stdint.h",
++ "/usr/include/sys/ioctl.h",
++ "/usr/lib/qt3/bin/qmake",
++ );
++
++my @libraries =
++(
++ "libaa",
++ "libacl",
++ "libart_lgpl",
++ "libaudit",
++ "libcrypt",
++ "libdbus-qt",
++ "libexpat",
++ "libexslt",
++ "libgcrypt",
++ "libgettextlib",
++ "libgg",
++ "libgpg-error",
++ "libgraph",
++ "libidn",
++ "libintl",
++ "libjpeg",
++ "libkdecorations",
++ "libkdecore",
++ "libldap",
++ "libmng",
++ "libncurses",
++ "libncursesw",
++ "libogrove",
++ "libpam",
++ "libpopt",
++ "libpthread",
++ "libsasl2",
++ "libslang",
++ "libtermcap",
++ "libz",
++ );
++
++
++##############################################################################
++# From xorg-build.pl
++##############################################################################
++sub git_config {
++    my ($option) = @_;
++
++    $option = `git-config --global --get $option`;
++    $option =~ s/^\s+//;
++    $option =~ s/\s+$//;
++
++    return $option;
++};
++
++my $x_depsdir = git_config("xorg-git.deps-dir");
++$x_depsdir = "/usr/local/xorg/deps" unless ($x_depsdir);
++$x_depsdir = Cwd::realpath($x_depsdir);
++##############################################################################
++# End From xorg-build.pl
++##############################################################################
++
++##############################################################################
++# Check for command line options
++Getopt::Std::getopts("bh?", \%options);
++if ($options{'h'} or $options{'?'}) {
++    print("Usage:\n",
++	  File::Basename::basename($0), " [options ...]\n",
++	  " -b       Build external dependency information.\n",
++	  " -h, -?   Prints this message and quits.\n");
++    exit(0);
++}
++
++##############################################################################
++# This can use a significant amount of memory
++my %database;
++sub load_database {
++    my ($name);
++
++    foreach $name (split('\n', `find $x_depsdir -type f -a -name \\*.deps.ext`)) {
++	$name = Cwd::realpath($name);
++	open(DATA, "<$name") or die("Cannot read $name ($!)");
++	$name =~ s/^$x_depsdir\///;
++	$name =~ s/\.deps.ext$//;
++	while (<DATA>) {
++	    chomp;
++	    push(@{$database{$_}}, $name);
++	}
++	close(DATA);
++    }
++};
++
++# Building new database?
++if ($options{'b'}) {
++    load_database();
++    print("my %dependencies = (\n");
++    foreach my $filename (sort keys %database) {
++	my $count = 0;
++	print("    \"$filename\"	=> [");
++	foreach my $module (@{$database{$filename}}) {
++	    print(", ") if (++$count > 1);
++	    print("\"$module\"");
++	}
++	print("],\n");
++    }
++    print(");\n");
++}
++# Just check/warn if not all components required are available
++else {
++    foreach my $package (@pkgconfig) {
++	`pkg-config --exists $package`;
++	print(STDERR "pkg-config: $package is missing.\n") if ($?);
++    }
++
++    foreach my $binary (@binaries) {
++	`which $binary > /dev/null 2>&1`;
++	print(STDERR "binary $binary is missing.\n") if ($?);
++    }
++
++    foreach my $file (@files) {
++	print(STDERR "file $file is missing.\n") unless (-f $file);
++    }
++
++    foreach my $library (@libraries) {
++	foreach my $path ("/usr/lib", "/lib", "/usr/local/lib") {
++	    `ls $path/$library*.so* > /dev/null 2>&1`;
++	    last unless ($?);
++	}
++	print(STDERR "library $library is missing.\n") if ($?);
++    }
++}
+diff --git a/xorg-scripts/xorg-scripts.txt b/xorg-scripts/xorg-scripts.txt
+index 376cea2..d02a132 100644
+--- a/xorg-scripts/xorg-scripts.txt
++++ b/xorg-scripts/xorg-scripts.txt
+@@ -1,6 +1,15 @@
+   How to use the scripts:
+ 
+ ========================================================================
++xorg-ext-deps.pl:
++  This script attempts to check for missing external packages, so that
++the build should not fail at some random place due to a missing requirement.
++  The option -b can be used to print a list of external files accessed
++during build, in a perl variable format.
++
++  You should run xorg-ext-deps.pl before continuing, to check for
++missing external dependencies.
++
+ xorg-build.pl:
+   First it is required to clone freedesktop modules.
+ 
+diff --git a/xorg-scripts/xorg-trace.pl b/xorg-scripts/xorg-trace.pl
+index 6f6291d..ee3d3a9 100755
+--- a/xorg-scripts/xorg-trace.pl
++++ b/xorg-scripts/xorg-trace.pl
+@@ -23,6 +23,7 @@ use Getopt::Std;
+ 
+ use strict;
+ 
++my %externals;
+ my %filenames;
+ my %options;
+ 
+@@ -32,12 +33,13 @@ my %options;
+ # TODO add possibly risky option of not creating dependency of libc and
+ # gcc header files, and possibly others; the X Protocol for example
+ # isn't expected to change, but some structures, usually extensions still can...
+-Getopt::Std::getopts("p:n:ish?", \%options);
++Getopt::Std::getopts("p:n:l:ish?", \%options);
+ if ($options{'h'} or $options{'?'}) {
+     print("Usage:\n",
+ 	  File::Basename::basename($0), " [options ...]\n",
+ 	  " -p path  Use given path as root build dir [default: .]\n",
+ 	  " -n name  Name for new dependency file [default: name of base directory]",
++	  " -l name  Name of log file for warning and error messages.\n",
+ 	  " -i       Install mode. Traces new files.\n",
+ 	  " -s       Silent mode.\n",
+ 	  " -h, -?   Prints this message and quits.\n");
+@@ -81,6 +83,27 @@ $x_destdir = "/usr/local/xorg" unless ($x_destdir);
+ ##############################################################################
+ 
+ 
++##############################################################################
++# Log error and warning messages
++sub x_log {
++    my ($command, $logname) = @_;
++
++    my $log = "";
++
++    open(CMD, "$command 2>&1|");
++    while (<CMD>) {
++	print($_);
++	$log .= $_ if (m/^[^:]+:(\d+:)+ (error|warning): /);
++    }
++    close(CMD);
++
++    if ($log ne "") {
++	open(LOG, ">$logname");
++	print(LOG $log);
++	close(LOG);
++    }
++};
++
+ 
+ ##############################################################################
+ my $buildtree = $options{'p'};
+@@ -94,15 +117,15 @@ if ($make eq "") {
+ }
+ 
+ # Strace build
+-print("   $strace $arguments $make\n");
++print("    $strace $arguments $make\n");
+ 
+-# trace it!   and print output so it can be logged
+-open(STRACE, "$strace $arguments $make|");
+-while(<STRACE>) {
+-    print($_);
++# trace it!
++if ($options{'l'}) {
++    x_log("$strace $arguments $make", $options{'l'});
++}
++else {
++    `$strace $arguments $make`;
+ }
+-close(STRACE);
+-
+ die("Strace exit code $? ($!)") if ($?);
+ 
+ 
+@@ -130,10 +153,19 @@ while (<STRACE>) {
+ 		 $filename =~ m/^\/tmp\// or
+ 		 $filename =~ m/\.cache$/);
+ 
+-	# Also don't care about anything not in builddir or destdir
+-	# XXX FIXME This doesn't catch install outside destdir...
+-	next if ($filename !~ m/^$x_builddir/ and
+-		 $filename !~ m/^$x_destdir/);
++	# Check for external dependencies
++	if ($filename !~ m/^$x_builddir/ and
++	    $filename !~ m/^$x_destdir/) {
++	    if ($syscall eq "open" and m/O_WRONLY|O_RDWR/) {
++		# File or directory created outside of build tree or install tree
++		$externals{$filename} = 0;
++	    }
++	    else {
++		# File outside build tree or install tree is required
++		$externals{$filename} = 1;
++	    }
++	    next;
++	}
+ 
+ 	# Install mode
+ 	if ($options{'i'}) {
+@@ -166,7 +198,6 @@ close(STRACE);
+ 
+ ##############################################################################
+ # Write dependency and file list
+-
+ open(DEP, ">>$depfile") or die("Cannot append to $depfile ($!).");
+ open(LST, ">>$instfile") or die("Cannot open $instfile for writing ($!).");
+ foreach (keys %filenames) {
+@@ -185,3 +216,21 @@ foreach (keys %filenames) {
+ }
+ close(LST);
+ close(DEP);
++
++
++##############################################################################
++# Write external dependency and possible files created outside install tree
++open(DEP, ">>$depfile.ext") or die("Cannot append to $depfile.ext ($!).");
++open(LST, ">>$instfile.ext") or die("Cannot open $instfile.ext for writing ($!).");
++foreach (keys %externals) {
++    if (-f $_) {
++	if ($externals{$_} == 0) {
++	    print(LST "$_\n");
++	}
++	else {
++	    print(DEP "$_\n");
++	}
++    }
++}
++close(LST);
++close(DEP);
+-- 
+1.5.6
+

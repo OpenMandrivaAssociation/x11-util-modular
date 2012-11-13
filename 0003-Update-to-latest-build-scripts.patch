@@ -1,0 +1,2999 @@
+From 70661c39bbb256528851fd9a389644d8e5929b2a Mon Sep 17 00:00:00 2001
+From: Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
+Date: Thu, 8 May 2008 17:55:18 -0300
+Subject: [PATCH] Update to latest build scripts.
+
+  These were used to generate the initial *-snapshot Mandriva packages.
+---
+ xorg-scripts/xorg-build.pl |  889 +++++++++++++++++++++++++++++++++++++++++---
+ xorg-scripts/xorg-deps.pl  |   29 ++-
+ xorg-scripts/xorg-trace.pl |    2 +-
+ 3 files changed, 862 insertions(+), 58 deletions(-)
+
+diff --git a/xorg-scripts/xorg-build.pl b/xorg-scripts/xorg-build.pl
+index 5f8b738..0ad182b 100755
+--- a/xorg-scripts/xorg-build.pl
++++ b/xorg-scripts/xorg-build.pl
+@@ -33,6 +33,12 @@ my $arguments = "";
+ # File name to know finished a build with no erros
+ my $build_ok = "xorg-build.ok";
+ 
++# Suffix for package names
++my $package_suffix = "-snapshot";
++my $package_destdir = "/opt/xorg-snapshot";
++
++my $rpm;
++
+ 
+ ##############################################################################
+ # This hash table is used to allow creating aliases to commads
+@@ -50,6 +56,8 @@ my %commands =
+  "checktarballs"=> "checktars",
+  "sh"		=> "shell",
+  "shell"	=> "shell",
++
++ "rpm"		=> "rpm",
+  );
+ 
+ 
+@@ -84,10 +92,16 @@ if (not $commands{$command} or $options{'h'} or $options{'?'}) {
+ 	  " distclean      Runs \"make clean distclean\".\n",
+ 	  " checktarballs  Checks if package tarball is available upstream.\n",
+ 	  " shell command  Executes <command> in checkout/build directory.\n",
++
++	  " rpm            Manages rpm snapshots\n",
+ 	  "\n");
+     exit(0);
+ }
+ 
++if ($command eq "rpm") {
++    $rpm = 1;
++}
++
+ # For the moment, check it only once. Required for some fallback default
+ # value options.
+ die ("\$ENV{HOME} not set. Cannot continue.") unless ($ENV{HOME} ne "");
+@@ -151,7 +165,12 @@ if ($xorg_git_lib_name eq "") {
+     }
+     # Try to guess proper default
+     $xorg_git_lib_name = `uname -m`;
+-    $xorg_git_lib_name = $xorg_git_lib_name =~ m/64/ ? "lib64" : "lib";
++    if ($rpm) {
++	$xorg_git_lib_name = "lib";
++    }
++    else {
++	$xorg_git_lib_name = $xorg_git_lib_name =~ m/64/ ? "lib64" : "lib";
++    }
+ }
+ 
+ # Example: sudo or empty string
+@@ -206,6 +225,16 @@ if ($xorg_git_deps_dir eq "") {
+     $xorg_git_deps_dir = "$ENV{HOME}/anongit.freedesktop.org/deps";
+ }
+ 
++# Example: /home/paulo/rpm
++my $xorg_git_rpm_dir = git_config("xorg-git.rpm-dir");
++if ($xorg_git_rpm_dir eq "") {
++    if ($rpm and $options{'v'}) {
++	print(STDERR "* Please consider running:\n",
++	      "\tgit-config --global xorg-git.rpm-dir /path/to/build/and/checkout/rpms\n");
++    }
++    $xorg_git_rpm_dir = "$ENV{HOME}/rpm";
++}
++
+ if ($options{'v'}) {
+     print(STDERR "Using options:\n",
+ 	  "  xorg-git.protocol     = $xorg_git_protocol\n",
+@@ -218,6 +247,7 @@ if ($options{'v'}) {
+ 	  "  xorg-git.deps-dir     = $xorg_git_deps_dir\n",
+ 	  "  xorg-git.lib-name     = $xorg_git_lib_name\n",
+ 	  "  xorg-git.sudo-command = $xorg_git_sudo_command\n",
++	  ($rpm ? "  xorg-git.rpm-dir      = $xorg_git_rpm_dir\n" : ""),
+ 	  "\n");
+ }
+ 
+@@ -230,6 +260,10 @@ die("$xorg_git_dest_dir does not exist.")
+     unless (-d $xorg_git_dest_dir);
+ die("$xorg_git_deps_dir does not exist.")
+     unless (-d $xorg_git_deps_dir);
++if ($rpm) {
++    die("$xorg_git_rpm_dir does not exist.")
++	unless (-d $xorg_git_rpm_dir);
++}
+ 
+ my $xorg_trace_pl = `which xorg-trace.pl`;
+ chomp($xorg_trace_pl);
+@@ -275,6 +309,12 @@ $ENV{PATH} = "$xorg_git_dest_dir/bin:$ENV{PATH}";
+ #	tarball		-> URL for tarball of module. This usually
+ #			   is the official tarball of the module
+ #	skip		-> Don't attempt to build this module
++#	package		-> Used in "sample" implementation of rpm packages
++#			   from git snapshots
++
++my $final_destdir = $rpm ? $package_destdir : $xorg_git_dest_dir;
++
++my $ac_libdir     = "--libdir=$final_destdir/$xorg_git_lib_name";
+ 
+ #xedit
+ my $ac_noxprint	  = "--disable-xprint";
+@@ -283,18 +323,32 @@ my $ac_noxprint	  = "--disable-xprint";
+ my $ac_xcb	  = "--with-xcb=yes";
+ 
+ # xserver
+-my $ac_buildaddr  = "--with-builder-addr=$git_user_email";
+-my $ac_builderstr = `uname -a`; chomp($ac_builderstr); $ac_builderstr = "--with-builderstring=\"\\\"$ac_builderstr\\\"\"";
+-my $ac_mesapath	  = "--with-mesa-source=$xorg_git_build_dir/mesa/mesa";
++my $ac_buildaddr  = "--with-builder-addr="			.
++    ($rpm ? "\$USER\@\`hostname\`" : $git_user_email);
++my $ac_builderstr;
++my $ac_kvesa;
++if ($rpm) {
++    $ac_kvesa	  = " \\
++%ifarch %%{x86} alpha
++--enable-kdrive-vesa \\
++%endif
++";
++    $ac_builderstr = "--with-builderstring=\"\`uname -onri | sed -e 's/ /_/g'\`\"";
++}
++else {
++    $ac_kvesa	   = $xorg_git_lib_name eq "lib" ? "" : "--enable-kdrive-vesa";
++    $ac_builderstr = `uname -a`; chomp($ac_builderstr); $ac_builderstr = "--with-builderstring=\"\\\"$ac_builderstr\\\"\"";
++}
++my $ac_mesapath	  = "--with-mesa-source=$final_destdir/"	.
++    ($rpm ? "src/Mesa" : "mesa/mesa");
+ my $ac_dga	  = "--enable-dga";
+ my $ac_dmx	  = "--enable-dmx";
+ my $ac_fontcache  = "--enable-fontcache";
+ my $ac_glx	  = "--enable-glx";
+ my $ac_glxtls	  = "--enable-glx-tls";
+ my $ac_kdrive	  = "--enable-kdrive";
+-my $ac_kvesa	  = "--enable-kdrive-vesa";
+ my $ac_mfb	  = "--enable-mfb";
+-my $ac_log_dir	  = "--with-log-dir=/var/log";
++my $ac_log_dir	  = "--with-log-dir=$final_destdir/var/log";
+ my $ac_xace	  = "--enable-xace";
+ my $ac_xdmcp	  = "--enable-xdmcp";
+ my $ac_xdmauth	  = "--enable-xdm-auth-1";
+@@ -314,11 +368,12 @@ my $ac_xvfb	  = "--enable-xvfb";
+ 
+ # mesa
+ my $ac_mesadriver = "--with-driver=dri";
+-my $ac_mesadridir = "--with-dri-driverdir=$xorg_git_dest_dir/$xorg_git_lib_name/dri";
++my $ac_mesadridir = "--with-dri-driverdir=$final_destdir/$xorg_git_lib_name/dri";
++my $ac_mkdep      = "MKDEP=$final_destdir/bin/gccmakedep";
+ 
+ # mesa
+-my $ac_xincludes  = "--x-includes=$xorg_git_dest_dir/include/X11";
+-my $ac_xlibraries = "--x-libraries=$xorg_git_dest_dir/$xorg_git_lib_name";
++my $ac_xincludes  = "--x-includes=$final_destdir/include/X11";
++my $ac_xlibraries = "--x-libraries=$final_destdir/$xorg_git_lib_name";
+ 
+ # xserver, mesa
+ my $ac_debug	  = "--enable-debug";
+@@ -357,79 +412,101 @@ my @modules =
+      'path'	=> "xorg/util",
+      'version'	=> "1.1.6",
+      'tarball'	=> "$xorg_url/$xorg_util/util-%{name}-%{version}$tgz",
++     'package'	=> "xorg-macros",
+  },
+  {
+      'name'	=> "x11proto",
+      'path'	=>"xorg/proto",
+      'version'	=> "7.0.12",
+      'tarball'	=> "$xorg_url/$xorg_proto/xproto-%{version}$tgz",
++     'package'	=> "x11proto",
+  },
+  {
+      'name'	=> "libxtrans",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/xtrans-%{version}$tgz",
++     'package'	=> "libxtrans",
+  },
+  {
+      'name'	=> "libXau",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxau",
+  },
+  {
+      'name'	=> "libXdmcp",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxdmcp",
+  },
+  {
+      'name'	=> "proto",
+      'path'	=> "xcb",
+      'version'	=> "1.1",
+      'tarball'	=> "http://xcb.freedesktop.org/dist/%{path}-%{name}-%{version}$tgz",
++     'package'	=> "xcb-proto",
++     'build'	=> ["libxml2-utils", "python"],
+  },
+  {
+      'name'	=> "libICE",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libice",
+  },
+  {
+      'name'	=> "inputproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.4.3",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "inputproto",
+  },
+  {
+      'name'	=> "kbproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.3",
+-     'tag'	=> "%{name}-%{version}",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "kbproto",
+  },
+  {
+      'name'	=> "xf86bigfontproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xf86bigfontproto",
++ },
++ {
++     'name'	=> "pthread-stubs",
++     'path'	=> "xcb",
++     'version'	=> "0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/libpthread-stubs-%{version}$tgz",
++     'package'	=> "pthread-stubs",
+  },
+  {
+      'name'	=> "libxcb",
+      'path'	=> "xcb",
+      'version'	=> "1.1",
+-     # Fixme tarball
++     'tarball'	=> "http://xcb.freedesktop.org/dist/%{name}-%{version}$tgz",
++     'package'	=> "libxcb",
++     'build'	=> ["libxslt-proc", "python", "doxygen",
++		    "graphviz", "pthread-stubs$package_suffix"],
+  },
+  {
+      'name'	=> "xextproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "7.0.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xextproto",
+  },
+  {
+      'name'	=> "libSM",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libsm",
+  },
+  {
+      'name'	=> "libX11",
+@@ -437,329 +514,414 @@ my @modules =
+      'version'	=> "1.1.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'configure'=> "$ac_xcb",
++     'package'	=> "libx11",
+  },
+  {
+      'name'	=> "libXt",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.5",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxt",
+  },
+  {
+      'name'	=> "libXext",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxext",
+  },
+  {
+      'name'	=> "printproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "printproto",
+  },
+  {
+      'name'	=> "libXmu",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxmu",
+  },
+  {
+      'name'	=> "libXpm",
+      'path'	=> "xorg/lib",
+      'version'	=> "3.5.7",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxpm",
+  },
+  {
+      'name'	=> "libXp",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxp",
+  },
+  {
+      'name'	=> "libXaw",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+-     'tag'	=> "%{name}-%{version}",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxaw",
+  },
+  {
+      'name'	=> "util",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-util",
+  },
+  {
+      'name'	=> "fixesproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "4.0",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "fixesproto",
+  },
+  {
+      'name'	=> "renderproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "0.9.3",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "renderproto",
+  },
+  {
+      'name'	=> "libXfixes",
+      'path'	=> "xorg/lib",
+      'version'	=> "4.0.3",
+-     'tag'	=> "%{name}-%{version}",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxfixes",
+  },
+  {
+      'name'	=> "damageproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.1.0",
+-     'tag'	=> "%{name}-%{version}",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "damageproto",
+  },
+  {
+      'name'	=> "xf86vidmodeproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "2.2.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xf86vidmodeproto",
+  },
+  {
+      'name'	=> "compositeproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "0.4",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "compositeproto",
+  },
+  {
+      'name'	=> "libXrender",
+      'path'	=> "xorg/lib",
+      'version'	=> "0.9.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxrender",
+  },
+  {
+      'name'	=> "xineramaproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xineramaproto",
+  },
+  {
+      'name'	=> "randrproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.2.1",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "randrproto",
+  },
+  {
+      'name'	=> "glproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.4.9",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "glproto",
+  },
+  {
+      'name'	=> "libXdamage",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.1.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxdamage",
+  },
+  {
+      'name'	=> "dri2proto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "dri2proto",
+  },
+  {
+      'name'	=> "drm",
+      'path'	=> "mesa",
+      'version'	=> "2.3.0",
+-     'tag'	=> "%{name}-%{version}",
+      'tarball'	=> "http://dri.freedesktop.org/libdrm/libdrm-%{version}$tgz",
++     'package'	=> "libdrm",
+  },
+  {
+      'name'	=> "libXxf86vm",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxxf86vm",
+  },
+  {
+      'name'	=> "libXi",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.1.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxi",
+  },
+  {
+      'name'	=> "libxkbfile",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxkbfile",
+  },
+  {
+      'name'	=> "videoproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "2.2.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "videoproto",
+  },
+  {
+      'name'	=> "fontcacheproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "0.1.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "fontcacheproto",
+  },
+  {
+      'name'	=> "fontsproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "2.0.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "fontsproto",
+  },
+  {
+      'name'	=> "libfontenc",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libfontenc",
++     'build'	=> ["zlib-devel"],
+  },
+  {
+      'name'	=> "libXcomposite",
+      'path'	=> "xorg/lib",
+      'version'	=> "0.4.0",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxcomposite",
++     'build'	=> ["xmlto"],
+  },
+  {
+      'name'	=> "libXcursor",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.1.9",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxcursor",
+  },
+  {
+      'name'	=> "libXinerama",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxinerama",
+  },
+  {
+      'name'	=> "libXrandr",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.2.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxrandr",
+  },
+  {
+      'name'	=> "recordproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.13.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "recordproto",
+  },
+  {
+      'name'	=> "xf86miscproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "0.9.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xf86miscproto",
+  },
+- { # XXX mesa Makefiles seems to be using the one in default search path
++ {
+      'name'	=> "makedepend",
+      'path'	=> "xorg/util",
+      'version'	=> "1.0.1",
+-     # Fixme tarball
+-     'skip'	=> "yes",
++     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
++     'package'	=> "makedepend",
++ },
++ {
++     'name'	=> "gccmakedep",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
++     'package'	=> "gccmakedep",
+  },
+  {
+      'name'	=> "mesa",
+      'path'	=> "mesa",
+-     'version'	=> "7.0.2",
++     'version'	=> "7.0.3",
+      # Fixme tarball
+      'configure'=>
+      "$ac_mesadriver "	.
+      "$ac_mesadridir "	.
+-     "$ac_xincludes "		.
++     "$ac_mkdep "	.
++     "$ac_xincludes "	.
+      "$ac_xlibraries "	.
+      ($options {'d'} ? "$ac_debug" : ""),
++     'package'	=> "mesa",
++     'build'	=> ["tcl", "texinfo", "libexpat-devel",
++		    "gccmakedep$package_suffix"],
+  },
+  {
+      'name'	=> "xf86driproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "2.0.3",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xf86driproto",
+  },
+  {
+      'name'	=> "libxkbui",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxkbui",
+  },
+  {
+      'name'	=> "resourceproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "resourceproto",
+  },
+  {
+      'name'	=> "evieproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/evieext-%{version}$tgz",
++     'package'	=> "evieproto",
+  },
+  {
+      'name'	=> "libXv",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxv",
+  },
+  {
+      'name'	=> "bigreqsproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "bigreqsproto",
+  },
+  {
+      'name'	=> "dmxproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "2.2.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "dmxproto",
+  },
+  {
+      'name'	=> "scrnsaverproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "scrnsaverproto",
+  },
+  {
+      'name'	=> "xcmiscproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xcmiscproto",
+  },
+  {
+      'name'	=> "xf86dgaproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "2.0.3",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xf86dgaproto",
+  },
+  {
+      'name'	=> "trapproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "3.4.3",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "trapproto",
+  },
+  {
+      'name'	=> "libXfont",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.3.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxfont",
++     'build'	=> ["freetype2-devel"],
+  },
+  {
+      'name'	=> "libpciaccess",
+      'path'	=> "xorg/lib",
+      'version'	=> "0.10",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libpciaccess",
++     'build'	=> ["pciids"],
+  },
+  {
+      'name'	=> "pixman",
+      'path'	=> "",	# empty path
+      'version'	=> "0.9.6",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "pixman",
+  },
+  {
+      'name'	=> "libXtst",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxtst",
++     'build'	=> ["xmlto"],
+  },
+  {
+      'name'	=> "libXxf86misc",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxxf86misc",
++ },
++ {
++     ## XXX Possible cyclic dependency.
++     ## Build of xserver was using system installed version, but
++     ## xserver with dmx enabled requires pkgconfig dmx, while
++     ## libdmx requires xserver built...
++     'name'	=> "libdmx",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libdmx",
++ },
++ {
++     ## XXX Another possible cyclic dependency.
++     ## Build of xserver was using system installed version, but
++     ## configure requires xres package available, and libxres
++     ## requires xserver built...
++     'name'	=> "libXRes",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/libXres-%{version}$tgz", # lowercase r
++     'package'	=> "libxres",
+  },
+  {
+      'name'	=> "xserver",
+@@ -796,414 +958,470 @@ my @modules =
+      "$ac_xselinux "	.
+      "$ac_xvfb "	.
+      ($options{'d'} ? "$ac_debug" : ""),
+- },
+- {
+-     'name'	=> "pthread-stubs",
+-     'path'	=> "xcb",
+-     'version'	=> "0.1",
+-     'tarball'	=> "$xorg_url/$xorg_lib/libpthread-stubs-%{version}$tgz",
++     'package'	=> "xserver",
++     'build'	=> ["libpam-devel", "libgpm-devel", "SDL-devel",
++		    "libgii-devel", "libhal-devel", "libdbus-devel",
++		    "openssl-devel", "bison", "flex",
++		    "mesa$package_suffix-source",
++		    # verify -- required by configure
++		    "libxres$package_suffix",
++		    "dmxproto$package_suffix", "libdmx$package_suffix"],
+  },
+  {
+      'name'	=> "libXprintUtil",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxprintutil",
+  },
+  {
+      'name'	=> "fontconfig",
+      'path'	=> "",	# empty path
+-     'version'	=> "2.5.0",
++     'version'	=> "2.5.91",
+      'tarball'	=> "http://fontconfig.org/release/fontconfig-%{version}.tar.gz",
++     'package'	=> "fontconfig",
++     'build'	=> ["ed", "lynx",
++		    "freetype2-devel", "docbook-utils", "docbook-utils-pdf",
++		    "docbook-dtd31-sgml", "docbook-dtd41-sgml",
++		    "libxml2-devel", "libxml2-utils"],
+  },
+  {
+      'name'	=> "windowswmproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "windowswmproto",
+  },
+  {
+      'name'	=> "applewmproto",
+      'path'	=> "xorg/proto",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "applewmproto",
+  },
+  {
+      'name'	=> "mkfontdir",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "mkfontdir",
+  },
+  {
+      'name'	=> "mkfontscale",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "mkfontscale",
++     'build'	=> ["freetype2-devel"],
+  },
+  {
+      'name'	=> "bdftopcf",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "bdftopcf",
+  },
+  {
+      'name'	=> "libXvMC",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxvmc",
+  },
+  {
+      'name'	=> "xcursorgen",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xcursorgen",
++     'build'	=> ["libpng-devel"],
+  },
+  {
+      'name'	=> "libXTrap",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxtrap",
+  },
+  {
+      'name'	=> "bitmaps",
+      'path'	=> "xorg/data",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/data/xbitmaps-1.0.1$tgz",
++     'package'	=> "xorg-data-bitmaps",
+  },
+  {
+      'name'	=> "libXfontcache",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxfontcache",
+  },
+  {
+      'name'	=> "pmproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/xproxymanagementprotocol-%{version}$tgz",
+- },
+- {
+-     'name'	=> "libXRes",
+-     'path'	=> "xorg/lib",
+-     'version'	=> "1.0.3",
+-     'tarball'	=> "$xorg_url/$xorg_lib/libXres-%{version}$tgz", # lowercase r
++     'package'	=> "pmproto",
+  },
+  {
+      'name'	=> "libXprintAppUtil",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxprintapputil",
+  },
+  {
+      'name'	=> "libXft",
+      'path'	=> "xorg/lib",
+      'version'	=> "2.1.12",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxft",
+  },
+  {
+      'name'	=> "libFS",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libfs",
+  },
+  {
+      'name'	=> "libXxf86dga",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+- },
+- {
+-     'name'	=> "libdmx",
+-     'path'	=> "xorg/lib",
+-     'version'	=> "1.0.2",
+-     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxxf86dga",
+  },
+  {
+      'name'	=> "liblbxutil",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "liblbxutil",
++     'build'	=> ["zlib-devel"],
+  },
+  {
+      'name'	=> "libXScrnSaver",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxscrnsaver",
+  },
+  {
+      'name'	=> "util",
+      'path'	=> "xcb",
+      'version'	=> "0.2",
+-     # Fixme tarball
++     'tarball'	=> "http://xcb.freedesktop.org/dist/%{path}-%{name}-%{version}$tgz",
++     'package'	=> "xcb-util",
++     'build'	=> ["gperf"],
+  },
+  {
+      'name'	=> "lndir",
+      'path'	=> "xorg/util",
+      'version'	=> "1.0.1",
+-     # Fixme tarball
++     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
++     'package'	=> "lndir",
+  },
+  {
+      'name'	=> "imake",
+      'path'	=> "xorg/util",
+      'version'	=> "1.0.2",
+-     # Fixme tarball
+- },
+- {
+-     'name'	=> "gccmakedep",
+-     'path'	=> "xorg/util",
+-     'version'	=> "1.0.2",
+-     # Fixme tarball
++     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
++     'package'	=> "imake",
+  },
+  {
+      'name'	=> "cf",
+      'path'	=> "xorg/util",
+      'version'	=> "1.0.2",
+-     # Fixme tarball
++     'tarball'	=> "$xorg_url/$xorg_util/xorg-cf-files-%{version}$tgz",
++     'package'	=> "xorg-util-cf",
+  },
+  {
+      'name'	=> "xf86rushproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xf86rushproto",
+  },
+  {
+      'name'	=> "liboldX",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "liboldx",
+  },
+  {
+      'name'	=> "libXevie",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libxevie",
+  },
+  {
+      'name'	=> "libWindowsWM",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libwindowswm",
+  },
+  {
+      'name'	=> "libAppleWM",
+      'path'	=> "xorg/lib",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'package'	=> "libapplewm",
+  },
+  {
+      'name'	=> "xfree86-type1",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-xfree86-type1",
+  },
+  {
+      'name'	=> "winitzki-cyrillic",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-winitzki-cyrillic",
+  },
+  {
+      'name'	=> "sony-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-sony-misc",
+  },
+  {
+      'name'	=> "screen-cyrillic",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-screen-cyrillic",
+  },
+  {
+      'name'	=> "schumacher-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-schumacher-misc",
+  },
+  {
+      'name'	=> "misc-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-misc-misc",
+  },
+  {
+      'name'	=> "misc-meltho",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-misc-meltho",
+  },
+  {
+      'name'	=> "misc-ethiopic",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-misc-ethiopic",
+  },
+  {
+      'name'	=> "misc-cyrillic",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-misc-cyrillic",
+  },
+  {
+      'name'	=> "micro-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-micro-misc",
+  },
+  {
+      'name'	=> "jis-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-jis-misc",
+  },
+  {
+      'name'	=> "isas-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-isas-misc",
+  },
+  {
+      'name'	=> "ibm-type1",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-ibm-type1",
+  },
+  {
+      'name'	=> "encodings",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_font/%{name}-%{version}$tgz",
++     'package'	=> "font-encodings",
+  },
+  {
+      'name'	=> "dec-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-dec-misc",
+  },
+  {
+      'name'	=> "daewoo-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-daewoo-misc",
+  },
+  {
+      'name'	=> "cursor-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-cursor-misc",
+  },
+  {
+      'name'	=> "cronyx-cyrillic",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-cronyx-cyrillic",
+  },
+  {
+      'name'	=> "bitstream-type1",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bitstream-type1",
+  },
+  {
+      'name'	=> "bitstream-speedo",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bitstream-speedo",
+  },
+  {
+      'name'	=> "bitstream-75dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bitstream-75dpi",
+  },
+  {
+      'name'	=> "bitstream-100dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bitstream-100dpi",
+  },
+  {
+      'name'	=> "bh-type1",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bh-type1",
+  },
+  {
+      'name'	=> "bh-ttf",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bh-ttf",
+  },
+  {
+      'name'	=> "bh-lucidatypewriter-75dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bh-lucidatypewriter-75dpi",
+  },
+  {
+      'name'	=> "bh-lucidatypewriter-100dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bh-lucidatypewriter-100dpi",
+  },
+  {
+      'name'	=> "bh-75dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bh-75dpi",
+  },
+  {
+      'name'	=> "bh-100dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-bh-100dpi",
+  },
+  {
+      'name'	=> "arabic-misc",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-arabic-misc",
+  },
+  {
+      'name'	=> "alias",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-alias",
+  },
+  {
+      'name'	=> "adobe-utopia-75dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-adobe-utopia-75dpi",
+  },
+  {
+      'name'	=> "adobe-utopia-100dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-adobe-utopia-100dpi",
+  },
+  {
+      'name'	=> "adobe-75dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-adobe-75dpi",
+  },
+  {
+      'name'	=> "adobe-100dpi",
+      'path'	=> "xorg/font",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++     'package'	=> "font-adobe-100dpi",
+  },
+  {
+      ### FIXME need to find official tarball url, if any
+      'name'	=> "xf86-video-xgixp",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.7.99.2",
++     'package'	=> "xf86-video-xgixp",
+  },
+  {
+      'name'	=> "xf86-video-xgi",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.5.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-xgi",
+  },
+  {
+      'name'	=> "xf86-video-wsfb",
+@@ -1217,12 +1435,14 @@ my @modules =
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-voodoo",
+  },
+  {
+      'name'	=> "xf86-video-vmware",
+      'path'	=> "xorg/driver",
+      'version'	=> "10.16.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-vmware",
+  },
+  {
+      'name'	=> "xf86-video-via",
+@@ -1230,138 +1450,161 @@ my @modules =
+      'version'	=> "0.2.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'skip'	=> "not building - drm/drm.h int64_t not defined - needs pciaccess conversion after not including drm/drm.h",
++     'package'	=> "xf86-video-via",
+  },
+  {
+      'name'	=> "xf86-video-vga",
+      'path'	=> "xorg/driver",
+      'version'	=> "4.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-vga",
+  },
+  {
+      'name'	=> "xf86-video-vesa",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-vesa",
+  },
+  {
+      'name'	=> "xf86-video-v4l",
+      'path'	=> "xorg/driver",
+      'version'	=> "0.1.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-v4l",
+  },
+  {
+      'name'	=> "xf86-video-tseng",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-tseng",
+  },
+  {
+      'name'	=> "xf86-video-trident",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.4",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-trident",
+  },
+  {
+      'name'	=> "xf86-video-tga",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-tga",
+  },
+  {
+      'name'	=> "xf86-video-tdfx",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.4.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-tdfx",
+  },
+  {
+      'name'	=> "xf86-video-suntcx",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "sparc architecture",
+  },
+  {
+      'name'	=> "xf86-video-sunleo",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "sparc architecture",
+  },
+  {
+      'name'	=> "xf86-video-sunffb",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "sparc architecture",
+  },
+  {
+      'name'	=> "xf86-video-suncg6",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "sparc architecture",
+  },
+  {
+      'name'	=> "xf86-video-suncg3",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "sparc architecture",
+  },
+  {
+      'name'	=> "xf86-video-suncg14",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "sparc architecture",
+  },
+  {
+      'name'	=> "xf86-video-sunbw2",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "sparc architecture",
+  },
+  {
+      'name'	=> "xf86-video-sisusb",
+      'path'	=> "xorg/driver",
+      'version'	=> "0.8.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-sisusb",
+  },
+  {
+      'name'	=> "xf86-video-sis",
+      'path'	=> "xorg/driver",
+      'version'	=> "0.9.4",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-sis",
+  },
+  {
+      'name'	=> "xf86-video-siliconmotion",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.6.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-siliconmotion",
+  },
+  {
+      'name'	=> "xf86-video-savage",
+      'path'	=> "xorg/driver",
+      'version'	=> "2.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-savage",
+  },
+  {
+      'name'	=> "xf86-video-s3virge",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.10.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-s3virge",
+  },
+  {
+      'name'	=> "xf86-video-s3",
+      'path'	=> "xorg/driver",
+      'version'	=> "0.6.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-s3",
+  },
+  {
+      'name'	=> "xf86-video-rendition",
+      'path'	=> "xorg/driver",
+      'version'	=> "4.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-rendition",
+  },
+  {
+      'name'	=> "xf86-video-radeonhd",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-radeonhd",
+  },
+  {
+      'name'	=> "xf86-video-r128",
+@@ -1369,12 +1612,14 @@ my @modules =
+      'version'	=> "6.8.0",
+      # not available
+      #'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-r128",
+  },
+  {
+      'name'	=> "xf86-video-nv",
+      'path'	=> "xorg/driver",
+      'version'	=> "2.1.8",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-nv",
+  },
+  {
+      'name'	=> "xf86-video-nsc",
+@@ -1382,24 +1627,28 @@ my @modules =
+      'version'	=> "2.8.3",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'skip'	=> "not building - nsc_driver.c:503: error: 'pciVideoPtr' undeclared (first use in this function)",
++     'package'	=> "xf86-video-nsc",
+  },
+  {
+      'name'	=> "xf86-video-newport",
+      'path'	=> "xorg/driver",
+      'version'	=> "0.2.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-newport",
+  },
+  {
+      'name'	=> "xf86-video-neomagic",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-neomagic",
+  },
+  {
+      'name'	=> "xf86-video-mga",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.4.8",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-mga",
+  },
+  {
+      'name'	=> "xf86-video-mach64",
+@@ -1407,12 +1656,14 @@ my @modules =
+      'version'	=> "6.8.0",
+      # not yet available
+      #'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-mach64",
+  },
+  {
+      'name'	=> "xf86-video-intel",
+      'path'	=> "xorg/driver",
+      'version'	=> "2.2.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-intel",
+  },
+  {
+      'name'	=> "xf86-video-imstt",
+@@ -1420,6 +1671,7 @@ my @modules =
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'skip'	=> "not building - imstt.h:13: error: expected specifier-qualifier-list before 'pciVideoPtr'",
++     'package'	=> "xf86-video-imstt",
+  },
+  {
+      'name'	=> "xf86-video-impact",
+@@ -1440,18 +1692,28 @@ my @modules =
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-i740",
+  },
+  {
+      'name'	=> "xf86-video-i128",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-i128",
+  },
+  {
+      'name'	=> "xf86-video-glint",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-glint",
++ },
++ {
++     'name'	=> "xf86-video-geode",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-geode",
+  },
+  {
+      'name'	=> "xf86-video-glide",
+@@ -1465,12 +1727,14 @@ my @modules =
+      'path'	=> "xorg/driver",
+      'version'	=> "0.4.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-fbdev",
+  },
+  {
+      'name'	=> "xf86-video-dummy",
+      'path'	=> "xorg/driver",
+      'version'	=> "0.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-dummy",
+  },
+  {
+      'name'	=> "xf86-video-cyrix",
+@@ -1478,361 +1742,430 @@ my @modules =
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'skip'	=> "not building - cyrix.h:113: error: expected specifier-qualifier-list before 'pciVideoPtr'",
++     'package'	=> "xf86-video-cyrix",
+  },
+  {
+      'name'	=> "xf86-video-cirrus",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-cirrus",
+  },
+  {
+      'name'	=> "xf86-video-chips",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-chips",
+  },
+  {
+      'name'	=> "xf86-video-ati",
+      'path'	=> "xorg/driver",
+      'version'	=> "6.8.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-ati",
+  },
+  {
+      'name'	=> "xf86-video-ast",
+      'path'	=> "xorg/driver",
+      'version'	=> "0.85.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-ast",
+  },
+  {
+      'name'	=> "xf86-video-ark",
+      'path'	=> "xorg/driver",
+      'version'	=> "0.7.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-ark",
+  },
+  {
+      'name'	=> "xf86-video-apm",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-apm",
+  },
+  {
+      'name'	=> "xf86-video-amd",
+      'path'	=> "xorg/driver",
+      'version'	=> "2.7.7.6",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+-     'skip'	=> "amd_gx_driver.c:331: error: 'pciVideoRec' undeclared (first use in this function)",
++     #     'skip'	=> "amd_gx_driver.c:331: error: 'pciVideoRec' undeclared (first use in this function)",
++     'package'	=> "xf86-video-amd",
+  },
+  {
+      'name'	=> "xf86-input-void",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-void",
+  },
+  {
+      'name'	=> "xf86-input-vmmouse",
+      'path'	=> "xorg/driver",
+      'version'	=> "12.5.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-vmmouse",
+  },
+  {
+      'name'	=> "xf86-input-ur98",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-ur98",
+  },
+  {
+      'name'	=> "xf86-input-tek4957",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-tek4957",
+  },
+  {
+      'name'	=> "xf86-input-summa",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-summa",
+  },
+  {
+      'name'	=> "xf86-input-spaceorb",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-spaceorb",
+  },
+  {
+      'name'	=> "xf86-input-penmount",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-penmount",
+  },
+  {
+      'name'	=> "xf86-input-palmax",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-palmax",
+  },
+  {
+      'name'	=> "xf86-input-mutouch",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-mutouch",
+  },
+  {
+      'name'	=> "xf86-input-mouse",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-mouse",
+  },
+  {
+      'name'	=> "xf86-input-microtouch",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-microtouch",
+  },
+  {
+      'name'	=> "xf86-input-magictouch",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.0.0.5",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-magictouch",
+  },
+  {
+      'name'	=> "xf86-input-magellan",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-magellan",
+  },
+  {
+      'name'	=> "xf86-input-keyboard",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-keyboard",
+  },
+  {
+      'name'	=> "xf86-input-joystick",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.3.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-joystick",
+  },
+  {
+      'name'	=> "xf86-input-jamstudio",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-jamstudio",
+  },
+  {
+      'name'	=> "xf86-input-hyperpen",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-hyperpen",
+  },
+  {
+      'name'	=> "xf86-input-fpit",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-fpit",
+  },
+  {
+      'name'	=> "xf86-input-evdev",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-evdev",
+  },
+  {
+      'name'	=> "xf86-input-elographics",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-elographics",
+  },
+  {
+      'name'	=> "xf86-input-elo2300",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-elo2300",
+  },
+  {
+      'name'	=> "xf86-input-dynapro",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-dynapro",
+  },
+  {
+      'name'	=> "xf86-input-dmc",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-dmc",
+  },
+  {
+      'name'	=> "xf86-input-digitaledge",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-digitaledge",
+  },
+  {
+      'name'	=> "xf86-input-citron",
+      'path'	=> "xorg/driver",
+      'version'	=> "2.2.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-citron",
+  },
+  {
+      'name'	=> "xf86-input-calcomp",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-calcomp",
+  },
+  {
+      'name'	=> "xf86-input-aiptek",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.1.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-aiptek",
+  },
+  {
+      'name'	=> "xf86-input-acecad",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-acecad",
++     #1*2*3*4*5*6*7*8*
+  },
+  {
+      'name'	=> "xorg-sgml-doctools",
+      'path'	=> "xorg/doc",
+      'version'	=> "1.2",
+      'tarball'	=> "$xorg_url/$xorg_doc/%{name}-%{version}$tgz",
++     'package'	=> "xorg-sgml-doctools",
+  },
+  {
+      'name'	=> "xorg-docs",
+      'path'	=> "xorg/doc",
+      'version'	=> "1.4",
+      'tarball'	=> "$xorg_url/$xorg_doc/%{name}-%{version}$tgz",
++     'package'	=> "xorg-docs",
++     ## XXX Test and make sure it works later...
++     #'configure'=> "--enable-ps --enable-html",
++     'build'	=> ["docbook-utils", "docbook-utils-pdf",
++		    "docbook-dtd31-sgml", "docbook-dtd41-sgml",
++		    "libxml2-devel", "libxml2-utils"],
+  },
+  {
+      'name'	=> "cursors",
+      'path'	=> "xorg/data",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/data/xcursor-themes-1.0.1$tgz",
++     'package'	=> "xorg-data-cursors",
+  },
+  {
+      'name'	=> "xwud",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xwud",
+  },
+  {
+      'name'	=> "xwininfo",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xwininfo",
+  },
+  {
+      'name'	=> "xwd",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xwd",
+  },
+  {
+      'name'	=> "xvinfo",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xvinfo",
+  },
+  {
+      'name'	=> "xvidtune",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xvidtune",
+  },
+  {
+      'name'	=> "xtrap",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xtrap",
+  },
+  {
+      'name'	=> "xstdcmap",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xstdcmap",
+  },
+  {
+      'name'	=> "xsm",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xsm",
++     # Shouldn't really need it to build from source...
++     'build'	=> ["rsh"],
+  },
+  {
+      'name'	=> "xsetroot",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xsetroot",
+  },
+  {
+      'name'	=> "xsetpointer",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xsetpointer",
+  },
+  {
+      'name'	=> "xsetmode",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.0",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xsetmode",
+  },
+  {
+      'name'	=> "xset",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xset",
+  },
+  {
+      'name'	=> "xrx",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xrx",
+  },
+  {
+      'name'	=> "xrestop",
+      'path'	=> "xorg/app",
+      'version'	=> "0.4",
+      # Fixme tarball
++     'package'	=> "xrestop",
++     'build'	=> ["ncurses-devel"],
+  },
+  {
+      'name'	=> "xrefresh",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xrefresh",
+  },
+  {
+      'name'	=> "xrdb",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.5",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xrdb",
+  },
+  {
+      'name'	=> "xrandr",
+      'path'	=> "xorg/app",
+      'version'	=> "1.2.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xrandr",
+  },
+  {
+      'name'	=> "xprop",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xprop",
+  },
+  {
+      'name'	=> "xprehashprinterlist",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xprehashprinterlist",
+  },
+  {
+      'name'	=> "xpr",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xpr",
+  },
+  {
+      'name'	=> "xplsprinters",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xplsprinters",
+  },
+  {
+      'name'	=> "xphelloworld",
+@@ -1840,186 +2173,220 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'configure'=> "$ac_motiflibs",
++     'package'	=> "xphelloworld",
+  },
+  {
+      'name'	=> "xmore",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xmore",
+  },
+  {
+      'name'	=> "xmodmap",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xmodmap",
+  },
+  {
+      'name'	=> "xmh",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xmh",
+  },
+  {
+      'name'	=> "xmessage",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xmessage",
+  },
+  {
+      'name'	=> "xman",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xman",
+  },
+  {
+      'name'	=> "xmag",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xmag",
+  },
+  {
+      'name'	=> "xlsfonts",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xlsfonts",
+  },
+  {
+      'name'	=> "xlsclients",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xlsclients",
+  },
+  {
+      'name'	=> "xlsatoms",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xlsatoms",
+  },
+  {
+      'name'	=> "xlogo",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xlogo",
+  },
+  {
+      'name'	=> "xload",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xload",
+  },
+  {
+      'name'	=> "xkill",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xkill",
+  },
+  {
+      'name'	=> "xkbutils",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xkbutils",
+  },
+  {
+      'name'	=> "xkbprint",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xkbprint",
+  },
+  {
+      'name'	=> "xkbevd",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xkbevd",
++     'build'	=> ["bison", "flex"],
+  },
+  {
+      'name'	=> "xkbcomp",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xkbcomp",
++     'build'	=> ["bison", "flex"],
+  },
+  {
+      'name'	=> "xinput",
+      'path'	=> "xorg/app",
+      'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xinput",
+  },
+  {
+      'name'	=> "xinit",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.8",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xinit",
+  },
+  {
+      'name'	=> "xhost",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xhost",
+  },
+  {
+      'name'	=> "xgc",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xgc",
++     'build'	=> ["bison", "flex"],
+  },
+  {
+      'name'	=> "xgamma",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xgamma",
+  },
+  {
+      'name'	=> "xfwp",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xfwp",
+  },
+  {
+      'name'	=> "xfsinfo",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xfsinfo",
+  },
+  {
+      'name'	=> "xfs",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.6",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xfs",
+  },
+  {
+      'name'	=> "xfontsel",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xfontsel",
+  },
+  {
+      'name'	=> "xfindproxy",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xfindproxy",
+  },
+  {
+      'name'	=> "xfd",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xfd",
+  },
+  {
+      'name'	=> "xf86dga",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xf86dga",
+  },
+  {
+      'name'	=> "xeyes",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xeyes",
+  },
+  {
+      'name'	=> "xev",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xev",
+  },
+  {
+      'name'	=> "xedit",
+@@ -2027,279 +2394,341 @@ my @modules =
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'configure'=> "$ac_noxprint",
++     'package'	=> "xedit",
+  },
+  {
+      'name'	=> "xdriinfo",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xdriinfo",
+  },
+  {
+      'name'	=> "xdpyinfo",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xdpyinfo",
+  },
+  {
+      'name'	=> "xdm",
+      'path'	=> "xorg/app",
+      'version'	=> "1.1.7",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xdm",
+  },
+  {
+      'name'	=> "xditview",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xditview",
+  },
+  {
+      'name'	=> "xdbedizzy",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xdbedizzy",
+  },
+  {
+      'name'	=> "xconsole",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xconsole",
+  },
+  {
+      'name'	=> "xcompmgr",
+      'path'	=> "xorg/app",
+      'version'	=> "1.1.4",
+      'tarball'	=> "http://xapps.freedesktop.org/release/%{name}-%{version}.tar.gz",
++     'package'	=> "xcompmgr",
+  },
+  {
+      'name'	=> "xcmsdb",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xcmsdb",
+  },
+  {
+      'name'	=> "xclock",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xclock",
+  },
+  {
+      'name'	=> "xclipboard",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xclipboard",
+  },
+  {
+      'name'	=> "xcalc",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xcalc",
+  },
+  {
+      'name'	=> "xbiff",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xbiff",
+  },
+  {
+      'name'	=> "xbacklight",
+      'path'	=> "xorg/app",
+      'version'	=> "1.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xbacklight",
+  },
+  {
+      'name'	=> "xauth",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "xauth",
+  },
+  {
+      'name'	=> "x11perf",
+      'path'	=> "xorg/app",
+      'version'	=> "1.5",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "x11perf",
+  },
+  {
+      'name'	=> "viewres",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "viewres",
+  },
+  {
+      'name'	=> "twm",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "twm",
++     'build'	=> ["bison", "flex"],
+  },
+  {
+      'name'	=> "smproxy",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "smproxy",
+  },
+  {
+      'name'	=> "showfont",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "showfont",
+  },
+  {
+      'name'	=> "setxkbmap",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.4",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "setxkbmap",
+  },
+  {
+      'name'	=> "sessreg",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "sessreg",
+  },
+  {
+      'name'	=> "scripts",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      # Fixme tarball
++     'package'	=> "xorg-scripts",
+  },
+  {
+      'name'	=> "rstart",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "rstart",
+  },
+  {
+      'name'	=> "rgb",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "rgb",
+  },
+  {
+      'name'	=> "rendercheck",
+      'path'	=> "xorg/app",
+      'version'	=> "1.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "rendercheck",
+  },
+  {
+      'name'	=> "proxymngr",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "proxymngr",
++     'build'	=> ["liblbxutil$package_suffix", ],
+  },
+  {
+      'name'	=> "oclock",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "oclock",
+  },
+  {
+      'name'	=> "mkcomposecache",
+      'path'	=> "xorg/app",
+      'version'	=> "1.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "mkcomposecache",
+  },
+  {
+      'name'	=> "luit",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "luit",
+  },
+  {
+      'name'	=> "listres",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "listres",
+  },
+  {
+      'name'	=> "lbxproxy",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "lbxproxy",
+  },
+  {
+      'name'	=> "intel-gen4asm",
+      'path'	=> "xorg/app",
+      # Fixme tarball
++     'package'	=> "intel-gen4asm",
++     'build'	=> ["bison", "flex"],
+  },
+  {
+      'name'	=> "ico",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "ico",
+  },
+  {
+      'name'	=> "iceauth",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "iceauth",
+  },
+  {
+      'name'	=> "grandr",
+      'path'	=> "xorg/app",
+      'version'	=> "0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "grandr",
++     'build'	=> ["libgtk+2-devel", "libGConf2-devel"],
+  },
+  {
+      'name'	=> "glxcompmgr",
+      'path'	=> "xorg/app",
+      # Fixme tarball
++     'package'	=> "glxcompmgr",
++     'build'	=> ["libGConf2-devel", "cairo-devel", "libpng-devel"],
+  },
+  {
+      'name'	=> "fstobdf",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.2",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "fstobdf",
+  },
+  {
+      'name'	=> "fslsfonts",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "fslsfonts",
+  },
+  {
+      'name'	=> "fonttosfnt",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "fonttosfnt",
++     'build'	=> ["freetype2-devel"],
+  },
+  {
+      'name'	=> "fdclock",
+      'path'	=> "xorg/app",
+      # Fixme tarball
++     'package'	=> "fdclock",
++     'build'	=> ["libcairo-devel"],
+  },
+  {
+      'name'	=> "editres",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "editres",
+  },
+  {
+      'name'	=> "constype",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "constype",
+  },
+  {
+      'name'	=> "compiz",
+      'path'	=> "xorg/app",
+      'version'	=> "0.7.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}.tar.gz",
++     'package'	=> "compiz",
++     'build'	=> ["dbus-glib-devel", "libGConf2-devel",
++		    "libgnome-window-settings-devel",
++		    "libwnck-devel", "metacity-devel", "pango-devel",
++		    "gnome-desktop-devel", "startup-notification-devel",
++		    "kdebase-devel", "bonoboui-devel", "libxslt-devel",
++		    "libxslt-proc", "librsvg-devel", "libcairo-devel",
++		    "libsvg-cairo-devel", "libdbus-qt-1-devel",
++		    "fuse-devel", "intltool"],
+  },
+  {
+      'name'	=> "bitmap",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "bitmap",
+  },
+  {
+      'name'	=> "beforelight",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "beforelight",
+  },
+  {
+      'name'	=> "appres",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'package'	=> "appres",
+  },
+  {
+      'name'	=> "xkeyboard-config",
+@@ -2308,24 +2737,30 @@ my @modules =
+      # Fixme tarball
+      # 'commit'	=> "-r v_1_1 xkeyboard-config",
+      'configure'=> "$ac_xkbcomplnk $ac_xkbrules $ac_xkbruleslnk",
++     'package'	=> "xkeyboard-config",
++     'build'	=> ["xkbcomp$package_suffix", "perl-XML-Parser",
++		    "intltool", "glib-gettextize"],
+  },
+  {
+      'name'	=> "demo",
+      'path'	=> "xcb",
+      'version'	=> "0.1",
+-     # Fixme tarball
++     'tarball'	=> "http://xcb.freedesktop.org/dist/%{path}-%{name}-%{version}$tgz",
++     'package'	=> "xcb-demo",
+  },
+  {
+      'name'	=> "xf86-video-nouveau",
+      'path'	=> "nouveau",
+      'version'	=> "1.2.0",
+      # Fixme tarball
++     'package'	=> "xf86-video-nouveau",
+  },
+  {
+      'name'	=> "xf86-video-avivo",
+      'path'	=> "avivo",
+      'version'	=> "0.0.999",
+      # Fixme tarball
++     'package'	=> "xf86-video-avivo",
+  },
+ 
+ 
+@@ -2380,7 +2815,10 @@ my @modules =
+      'name'	=> "edid-decode",
+      'path'	=> "xorg/app",
+      # Fixme tarball
+-     #'skip'	=> "yes",
++     # Needs an install target
++     'skip'	=> "yes",
++     'package'	=> "edid-decode",
++     'build'	=> ["zsh"],
+  },
+  {
+      'name'	=> "makepsres",
+@@ -2398,6 +2836,7 @@ my @modules =
+      'name'	=> "xshowdamage",
+      'path'	=> "xorg/app",
+      # Fixme tarball
++     # needs an install target
+      'skip'	=> "yes",
+  },
+  {
+@@ -2416,7 +2855,6 @@ my @modules =
+  },
+  );
+ 
+-
+ ##############################################################################
+ # Simple wrapper that prints errno string if not successful
+ sub x_system {
+@@ -2687,6 +3125,326 @@ sub shell {
+ 
+ 
+ ##############################################################################
++# Rpm related functions
++my %rpm_build_requires;
++my %rpm_trans_table;
++
++# Converts output of xorg-deps.pl that is the full path of a module to
++# a package name.
++sub rpm_trans {
++    my ($module) = @_;
++
++    unless ($rpm_trans_table{$module}) {
++	foreach (@modules) {
++	    if (($_->{'path'} ne "" and $module eq "$_->{'path'}/$_->{'name'}")
++		or $_->{'name'} eq $module) {
++		$rpm_trans_table{$module} = $_->{'package'};
++		last;
++	    }
++	}
++    }
++
++    return $rpm_trans_table{$module};
++};
++
++# Builds name translation table and list build dependencies. This assumes
++# a "non rpm build" has been already done.
++sub rpm_init {
++    my $module;
++    my $xorg_deps_pl = `which xorg-deps.pl`;
++
++    chomp($xorg_deps_pl);
++    $xorg_deps_pl = "./xorg-deps.pl" unless (-f $xorg_deps_pl);
++    die ("$xorg_deps_pl: ($!)") unless (-f $xorg_deps_pl);
++    $xorg_deps_pl = "/usr/bin/perl $xorg_deps_pl -p";
++
++    open(DEPS, "$xorg_deps_pl |");
++    while (<DEPS>) {
++	if (s/^--> //) {
++	    chomp;
++	    $module = rpm_trans($_);
++	    print(STDERR " \*\* Cannot resolve $_\n") if ($module eq undef);
++	}
++	elsif ($module ne undef and s/BuildRequires: //) {
++	    chomp();
++	    $_ = rpm_trans($_);
++	    push(@{$rpm_build_requires{$module}}, $_)
++		if ($_ ne $module);
++	}
++    }
++    close(DEPS);
++};
++
++##############################################################################
++# Checks if some package needs to be rebuilt, and does it
++sub rpm {
++    my ($module) = \%{$_};
++
++    my ($path, $name, $configure, $package) =
++	($module->{'path'},
++	 $module->{'name'},
++	 $module->{'configure'},
++	 $module->{'package'});
++
++    my $SILENT = "";
++    my $summary = $name eq "xkeyboard-config" ?
++	"cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name" :
++	"git clone git://anongit.freedesktop.org/git/$path/$name";
++
++    my $rpmname = $package;
++    $package .= $package_suffix;
++
++    my ($svnadd, $tmp, $old_version, $old_commit, $version, $commit);
++
++    unless (-f "$xorg_git_rpm_dir/$package/SPECS/$package.spec") {
++	x_chdir($xorg_git_rpm_dir);
++	if (! -d $package) {
++	    x_system("svn co svn+ssh://pcpa\@svn.mandriva.com/svn/packages/cooker/$package/current $package");
++	    if (! -d $package) {
++		# Should be execute only once...
++		x_system("svn mkdir -m '$package' svn+ssh://pcpa\@svn.mandriva.com/svn/packages/cooker/$package");
++		x_system("svn mkdir -m '$package' svn+ssh://pcpa\@svn.mandriva.com/svn/packages/cooker/$package/current");
++		x_system("svn co svn+ssh://pcpa\@svn.mandriva.com/svn/packages/cooker/$package/current $package");
++		x_chdir($package);
++		x_system("svn mkdir SPECS");
++		x_system("svn mkdir SOURCES");
++		$svnadd = 1;
++	    }
++	}
++    }
++
++    if (-f "$xorg_git_rpm_dir/$package/SPECS/$package.spec") {
++	$tmp = `head -1 $xorg_git_rpm_dir/$package/SPECS/$package.spec`;
++	$tmp =~ m/#([^:]+):(\S+)/;
++	$old_version = $1;
++	$old_commit = $2;
++	$svnadd = 0;
++	# Avoid repeated messages on rpm Changelong due to
++	# modifying first line.
++	## Usual method is just leave it as # only.
++	if ($old_version eq "" or $old_commit eq "") {
++	    $SILENT = "SILENT: ";
++	}
++    }
++    elsif (! -d "$xorg_git_rpm_dir/$package") {
++	die("Cannot create/checkout $package.\n");
++    }
++
++    x_chdir("$xorg_git_checkout_dir/$path/$name");
++
++    if ($name ne "xkeyboard-config") {
++	$tmp = $/;
++	$/ = undef;
++	my $data = `git-log --date=short | head -3`;
++	$/ = $tmp;
++
++	$data =~ m/commit\s(\S+)/;
++	$commit = $1;
++	$data =~ m/Date:\s+(\d+-\d+-\d+)/;
++	$version = $1;
++	$version =~ s/-//g;
++    }
++    else {
++	$version = 0;
++	open(LOG, "cvs log |");
++	while (<LOG>) {
++	    if (m/date:\s+(\d+-\d+-\d+)/) {
++		$_ = $1;
++		s/-//g;
++		# Not checking utc
++		if ($_+0 > $version) {
++		    $version = $_+0;
++		}
++	    }
++	}
++	$commit = $version;
++	close(LOG);
++    }
++
++    if ($version <= $old_version or ($commit and $commit eq $old_commit)) {
++	# Check build requires, as if build requires changed, this
++	# package could still require a rebuild.
++
++	return;
++    }
++
++    if ($name ne "xkeyboard-config") {
++	x_system("git-archive --format=tar --prefix=$package/ master | bzip2 > $package.tar.bz2");
++	if ($name eq "mesa") {
++	    x_system("mkdir ../Mesa");
++	    x_system("for f in `find . -name \*.c -o -name \*.h`; do install -D \$f ../Mesa/\$f; done");
++	    x_system("cd ..; tar jcf mesa-source.tar.bz2 Mesa; rm -fr Mesa; mv *.tar.bz2 mesa");
++	}
++    }
++    else {
++	x_chdir("..");
++	x_system("cp -far $name $package");
++	x_system("tar jcf $package.tar.bz2 $package");
++	x_system("rm -fr $package");
++	x_system("mv $package.tar.bz2 $name");
++    }
++
++    x_chdir("$xorg_git_rpm_dir/$package");
++    open(SPEC, ">SPECS/$package.spec") or die("Cannot create $package.spec\n");
++    print(SPEC
++	  "#$version:$commit
++Name: $package
++Version: $version
++Release: %mkrel 1
++Summary: $summary
++Group: System/X11
++URL: http://xorg.freedesktop.org
++Source: $package.tar.bz2
++"	.
++	  ($name eq "mesa" ? "Source1: mesa-source.tar.bz2
++" : "")	.
++"License: MIT
++BuildRoot: %{_tmppath}/%{name}-root
++
++");
++    foreach (@{$rpm_build_requires{$rpmname}}) {
++	print(SPEC "BuildRequires: $_$package_suffix\n");
++    }
++    foreach (@{$module->{'build'}}) {
++	print(SPEC "BuildRequires: $_\n");
++    }
++    foreach (@{$module->{'requires'}}) {
++	print(SPEC "Requires: $_\n");
++    }
++
++    my $make = $name eq "libXtst" ? "make" : "%make";
++
++    print(SPEC "
++%description
++$package is a snapshot of the code from
++\"$summary \\
++$path" . ($path ne "" ? "/" : "") . "$name\"
++
++%prep
++%setup -q -n $package
++
++%build
++PATH=$package_destdir/bin:\$PATH
++PKG_CONFIG_PATH=$package_destdir/$xorg_git_lib_name/pkgconfig
++LD_LIBRARY_PATH=$package_destdir/$xorg_git_lib_name:\$LD_LIBRARY_PATH
++"	. ($name ne "macros" ? "ACLOCAL_LOCALDIR=$package_destdir/share/aclocal
++ACLOCAL=\"aclocal -I \$ACLOCAL_LOCALDIR\"
++export PATH PKG_CONFIG_PATH LD_LIBRARY_PATH ACLOCAL_LOCALDIR ACLOCAL" :
++"export PATH PKG_CONFIG_PATH LD_LIBRARY_PATH")		.
++	($name eq "mesa" ? 
++"
++EXTRA_LIB_PATH=-L$package_destdir/$xorg_git_lib_name
++export EXTRA_LIB_PATH
++autoconf
++make configure
++./configure --prefix=$package_destdir $ac_libdir $configure" :
++"
++./autogen.sh --prefix=$package_destdir $ac_libdir $configure")	.
++"
++
++$make
++
++%install
++rm -fr %{buildroot}
++%makeinstall_std
++"	.
++	  ($name eq "mesa" ? "
++%ifnarch %{sparc}
++rm -f %{buildroot}/$package_destdir/lib/dri/ffb_dri.so
++%endif
++pushd %{buildroot}
++mkdir -p %{buildroot}/$package_destdir/src
++cd %{buildroot}/$package_destdir/src
++tar jxf %{SOURCE1}
++popd
++" : "")	.
++"
++%clean
++rm -rf %{buildroot}
++
++%files
++%defattr(-,root,root)
++");
++
++    if ($name eq "libXaw") {
++	print(SPEC "$package_destdir/lib/libXaw.so*\n");
++    }
++
++
++    # Replace "from source destdir" with package destdir, and leave a
++    # place to allow adding extra hooks on filename/path transformation.
++    open(FILES, "$xorg_git_deps_dir/$path/$name.files")
++	or die ("Cannot read $xorg_git_deps_dir/$path/$name.files\n");
++    while (<FILES>) {
++	s/^$xorg_git_dest_dir/$package_destdir/;
++	# It executes symlink("old", "new") using relative pathnames,
++	# and tracking the current dir in strace output isn't that easy...
++	s/lib([a-zA-Z0-9-]+)\.so\.\d+\.\d+(\.\d+)?$/lib$1.so\*/;
++	# Manpages are compressed
++	s/(share\/man\/man\d\/.*\.\d)$/$1\*/;
++	if ($name eq "mesa" and
++	    m/dri\/(i810|s3v|sis|trident)_dri\.so/) {
++	    print(SPEC "%ifarch %{ix86}
++$_%endif
++");
++	}
++	elsif ($name eq "xserver" and
++	       m/bin\/X(ati|chips|i810|mach64|mga|nvidia|pm2|r128|smi|vesa|via)?$/) {
++	    print(SPEC "%ifarch %{ix86} alpha
++$_%endif
++");
++	}
++	elsif ($name eq "xkeyboard-config" and
++	       m/rules\/(sgi|sun)(.xml)?/) {
++	    # say hi ... Fixme
++	else {
++	    print(SPEC $_);
++	}
++    }
++    close(FILES);
++    if ($name eq "xserver") {
++	print(SPEC "
++$package_destdir/bin/X
++$package_destdir/bin/in*
++$package_destdir/bin/out*
++");
++    }
++    elsif ($name eq  "mesa") {
++	print(SPEC "
++%package source
++Summary: Mesa source files required to compile the X Server
++Group: Development/C
++
++%description source
++Mesa is an OpenGL 2+ compatible 3D graphics library.
++
++Source files required to compile the X Server.
++
++%files source
++%defattr(-,root,root)
++$package_destdir/src/*
++");
++    }
++    elsif ($name eq "xkeyboard-config") {
++	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg
++$package_destdir/share/X11/xkb/rules/xorg.lst
++$package_destdir/share/X11/xkb/rules/xorg.xml
++");
++    }
++
++    close(SPEC);
++
++    x_system("mv -f $xorg_git_checkout_dir/$path/$name/*.tar.bz2 $xorg_git_rpm_dir/$package/SOURCES");
++
++    x_system("svn add SPECS/*.spec SOURCES/*.bz2") if ($svnadd == 1);
++    x_system("svn ci -m '$SILENT$rpmname $version snapshot'");
++    my $commit = `svn update`;
++    $commit =~ s/\D//g;
++    x_system("repsys submit -t cooker --define section=contrib/testing svn+ssh://svn.mandriva.com/svn/packages/cooker/$package $commit", 1);
++};
++
++
++##############################################################################
+ # Replace hash values with macros in the format %{string} to $module->{'string'}
+ #   Only one pass and no specific order
+ sub replace_macros_and_check_errors {
+@@ -2698,6 +3456,9 @@ sub replace_macros_and_check_errors {
+ 	    #die("$module->{package} doesn't have a version")
+ 		#unless($module->{'version'} or $module->{'skip'});
+ 
++	    # Hack to allow escaping macros in automatic generation of rpm specs
++	    $value =~ s/%%/<%>/g;
++
+ 	    while ($value =~ /%\{(\w+)\}/) {
+ 		$macro = $1;
+ 		if ($module->{$macro}) {
+@@ -2710,6 +3471,8 @@ sub replace_macros_and_check_errors {
+ 		}
+ 		$value =~ s/%\{$1\}/$replace/g;
+ 	    }
++
++	    $value =~ s/<%>/%/g;
+ 	    $module->{$key} = $value;
+ 	}
+     }
+@@ -2731,12 +3494,28 @@ my %table = (
+     "distclean"	=>	\&distclean,
+     "checktars"	=>	\&checktars,
+     "shell"	=>	\&shell,
++    "rpm"	=>	\&rpm,
+ );
+ 
+ #  Add skip for -n option
+ if ($options{'n'}) {
+     foreach (@modules) {
+-	$_->{'skip'} = "yes" unless ($_->{'name'} eq $options{'n'});
++	if ($options{'n'} =~ m/\//) {
++	    $_->{'skip'} = "yes"
++	        unless ($_->{'path'}			.
++			($_->{'path'} ne "" ? "/" : "")	.
++			$_->{'name'} eq $options{'n'});
++	}
++	else {
++	    $_->{'skip'} = "yes" unless ($_->{'name'} eq $options{'n'});
++	}
++    }
++}
++#  Add skip for modules without a 'package' entry
++if ($rpm) {
++    rpm_init() if ($command eq "rpm");
++    foreach (@modules) {
++	$_->{'skip'} = "yes" unless ($_->{'package'});
+     }
+ }
+ 
+@@ -2751,7 +3530,7 @@ if ($command eq "update" and not $options{'c'} and -f $git_last_update) {
+ foreach (@modules) {
+     print(STDERR "--> $_->{name}\n");
+     my $function = $table{$command};
+-    $function->($_) unless($_->{'skip'});
++    $function->($_) unless ($_->{'skip'});
+ }
+ # If using a temp file to not need to restart over an update...
+ if ($command eq "update" and -f $git_last_update) {
+diff --git a/xorg-scripts/xorg-deps.pl b/xorg-scripts/xorg-deps.pl
+index 6585bde..bb4eb07 100755
+--- a/xorg-scripts/xorg-deps.pl
++++ b/xorg-scripts/xorg-deps.pl
+@@ -18,9 +18,23 @@
+ ##############################################################################
+ 
+ use Cwd;
++use File::Basename;
++use Getopt::Std;
+ 
+ use strict;
+ 
++my %options;
++Getopt::Std::getopts("ph?", \%options);
++
++if ($options{'h'} or $options{'?'}) {
++    print(STDERR "Usage:\n",
++	  File::Basename::basename($0), " [-ph?]\n",
++	  "Options:]\n",
++	  " -p     Print output in a format suitable for rpm BuildRequires.\n",
++	  " -h, -? Prints this message and quits.\n");
++    exit(0);
++}
++
+ 
+ ##############################################################################
+ # From xorg-build.pl
+@@ -36,7 +50,7 @@ sub git_config {
+ };
+ 
+ my $x_depsdir = git_config("xorg-git.deps-dir");
+-$x_depsdir = "/usr/local/xorg/deps" unless ($x_depsdir);
++$x_depsdir = "$ENV{HOME}/anongit.freedesktop.org/deps" unless ($x_depsdir);
+ $x_depsdir = Cwd::realpath($x_depsdir);
+ ##############################################################################
+ # End From xorg-build.pl
+@@ -123,4 +137,15 @@ sub print_build_order {
+ };
+ 
+ # Do it again
+-print_build_order();
++if ($options{'p'}) {
++    foreach my $module (keys %dependencies) {
++	print("\n--> $module\n");
++	foreach my $depend (@{$dependencies{$module}}) {
++	    print("BuildRequires: $depend\n");
++	}
++    }
++
++}
++else {
++    print_build_order();
++}
+\ No newline at end of file
+diff --git a/xorg-scripts/xorg-trace.pl b/xorg-scripts/xorg-trace.pl
+index ee3d3a9..a6b8ed8 100755
+--- a/xorg-scripts/xorg-trace.pl
++++ b/xorg-scripts/xorg-trace.pl
+@@ -138,7 +138,7 @@ while (<STRACE>) {
+     # If did open or exec file file.
+     # Also check for files opened to write, like gcc temp files
+     # And also don't generate dependencies on directories
+-    if (m/^\d+\s+(\w+)\("([^"]+)".*\) = \d+$/) {
++    if (m/^\d+\s+(\w+)\("([^"]+)"(.*)\) = \d+$/) {
+ 	my $syscall = $1;
+ 	my $filename = $2;
+ 
+-- 
+1.5.6
+

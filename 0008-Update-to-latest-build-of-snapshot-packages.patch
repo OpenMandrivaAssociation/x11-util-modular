@@ -1,0 +1,763 @@
+From 42ba563a8aaa5ce79a0bdc6b944a768a99ebc7f7 Mon Sep 17 00:00:00 2001
+From: Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
+Date: Wed, 30 Jul 2008 17:22:11 -0300
+Subject: [PATCH] Update to latest build of -snapshot packages.
+
+---
+ xorg-scripts/xorg-build.pl   |  404 ++++++++++++++++++++++++++----------------
+ xorg-scripts/xorg-symbols.pl |    2 +-
+ 2 files changed, 248 insertions(+), 158 deletions(-)
+
+diff --git a/xorg-scripts/xorg-build.pl b/xorg-scripts/xorg-build.pl
+index fe1e6fa..749c969 100755
+--- a/xorg-scripts/xorg-build.pl
++++ b/xorg-scripts/xorg-build.pl
+@@ -326,34 +326,38 @@ my $ac_buildaddr  = "--with-builder-addr="			.
+ my $ac_builderstr;
+ my $ac_kvesa;
+ if ($rpm) {
++    ## FIXME did not build on buildsystem due to missing IOPL_MASK definition...
+     $ac_kvesa	  = " \\
+ %ifarch %%{x86} alpha
+---enable-kdrive-vesa \\
++--disable-kdrive-vesa \\
+ %endif
+ ";
+     $ac_builderstr = "--with-builderstring=\"\`uname -onri | sed -e 's/ /_/g'\`\"";
+ }
+ else {
+-    $ac_kvesa	   = $xorg_git_lib_name eq "lib" ? "" : "--enable-kdrive-vesa";
++    $ac_kvesa	   = $xorg_git_lib_name eq "lib" ? "" : "--disable-kdrive-vesa";
+     $ac_builderstr = `uname -a`; chomp($ac_builderstr); $ac_builderstr = "--with-builderstring=\"\\\"$ac_builderstr\\\"\"";
+ }
++
+ my $ac_dga	  = "--enable-dga";
+ my $ac_dmx	  = "--disable-dmx";
++my $ac_dri2	  = "--enable-dri2";
+ my $ac_fontcache  = "--enable-fontcache";
++my $ac_fonts	  = "--disable-builtin-fonts";
+ my $ac_glx	  = "--enable-glx";
+-my $ac_kdrive	  = "--enable-kdrive";
++my $ac_kdrive	  = "--disable-kdrive";
+ my $ac_log_dir	  = "--with-log-dir=$final_destdir/var/log";
+ my $ac_xace	  = "--enable-xace";
+ my $ac_xdmcp	  = "--enable-xdmcp";
+ my $ac_xdmauth	  = "--enable-xdm-auth-1";
+-my $ac_xephyr	  = "--enable-xephyr";
++my $ac_xephyr	  = "--disable-xephyr";
+ my $ac_xf86misc	  = "--enable-xf86misc";
+ my $ac_xf86vid	  = "--enable-xf86vidmode";
+ my $ac_xfake	  = "--disable-xfake";
+-my $ac_xfbdev	  = "--enable-xfbdev";
++my $ac_xfbdev	  = "--disable-xfbdev";
+ my $ac_xorg	  = "--enable-xorg";
+ my $ac_xorgcfg	  = "--enable-xorgcfg";
+-my $ac_xsdl	  = "--enable-xsdl";
++my $ac_xsdl	  = "--disable-xsdl";
+ my $ac_xselinux	  = "--disable-xselinux";
+ my $ac_xvfb	  = "--enable-xvfb";
+ 
+@@ -367,7 +371,6 @@ my $ac_glxtls	  = "--disable-glx-tls";
+ my $ac_demos	  = "--with-demos=yes";
+ my $ac_mesadriver = "--with-driver=dri";
+ my $ac_mesadridir = "--with-dri-driverdir=$final_destdir/$xorg_git_lib_name/dri";
+-my $ac_mkdep      = "MKDEP=$final_destdir/bin/gccmakedep";
+ my $ac_ttm	  = "--enable-ttm-api";
+ my $ac_x	  = "--with-x";
+ 
+@@ -409,7 +412,7 @@ my %branches =
+     {
+ 	'packages'	=> ["libdrm", "mesa", "xf86-video-intel"],
+     },
+-    'branch-stable'	=>
++    'X11R7.4'		=>
+     {
+ 	'packages'	=> ["libdrm", "mesa", "xserver"],
+     },
+@@ -512,8 +515,10 @@ my @modules =
+      'version'	=> "1.1",
+      'tarball'	=> "http://xcb.freedesktop.org/dist/%{name}-%{version}$tgz",
+      'package'	=> "libxcb",
+-     'build'	=> ["libxslt-proc", "python", "doxygen",
+-		    "graphviz", "pthread-stubs$package_suffix"],
++     'build'	=> ["libxslt-proc", "python", "doxygen", "graphviz",
++		    "pthread-stubs$package_suffix",
++		    "libx11$package_suffix", "libxext$package_suffix"],
++     'requires' => ["pthread-stubs$package_suffix"],
+  },
+  {
+      'name'	=> "xextproto",
+@@ -528,6 +533,22 @@ my @modules =
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libsm",
++		    # uuid
++     'build'	=> ["libext2fs-devel"],
++ },
++ {
++     'name'	=> "bigreqsproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "bigreqsproto",
++ },
++ {
++     'name'	=> "xcmiscproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.1.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++     'package'	=> "xcmiscproto",
+  },
+  {
+      'name'	=> "libX11",
+@@ -536,7 +557,8 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'configure'=> "$ac_xcb",
+      'package'	=> "libx11",
+-     'requires'	=> ["libxcb$package_suffix"],
++     'build'	=> ["xcmiscproto$package_suffix", "bigreqsproto$package_suffix",
++		    "libxcb$package_suffix"],
+  },
+  {
+      'name'	=> "libXt",
+@@ -715,7 +737,7 @@ my @modules =
+      'version'	=> "1.1.3",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libxi",
+-     'build'	=> ["xmlto"],
++     'build'	=> ["xmlto", "docbook-dtd43-xml"],
+  },
+  {
+      'name'	=> "libXinerama",
+@@ -802,13 +824,6 @@ my @modules =
+      'package'	=> "libxv",
+  },
+  {
+-     'name'	=> "bigreqsproto",
+-     'path'	=>"xorg/proto",
+-     'version'	=> "1.0.2",
+-     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "bigreqsproto",
+- },
+- {
+      'name'	=> "dri2proto",
+      'path'	=>"xorg/proto",
+      'version'	=> "1.0.0",
+@@ -823,13 +838,6 @@ my @modules =
+      'package'	=> "scrnsaverproto",
+  },
+  {
+-     'name'	=> "xcmiscproto",
+-     'path'	=>"xorg/proto",
+-     'version'	=> "1.1.2",
+-     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
+-     'package'	=> "xcmiscproto",
+- },
+- {
+      'name'	=> "xf86dgaproto",
+      'path'	=>"xorg/proto",
+      'version'	=> "2.0.3",
+@@ -850,6 +858,7 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libxfont",
+      'build'	=> ["freetype2-devel"],
++     'requires'	=> ["freetype2-devel"],
+  },
+  {
+      'name'	=> "libpciaccess",
+@@ -891,6 +900,101 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libdmx",
+  },
++
++ {
++     'name'	=> "drm",
++     'path'	=> "mesa",
++     'version'	=> "2.3.0",
++     'tarball'	=> "http://dri.freedesktop.org/libdrm/libdrm-%{version}$tgz",
++     'package'	=> "libdrm",
++ },
++ {
++     'name'	=> "drm",
++     'path'	=> "mesa",
++     'commit'	=> "origin/drm-gem",
++     'package'	=> "libdrm-branch-gem",
++ },
++ {
++     'name'	=> "drm",
++     'path'	=> "mesa",
++     'commit'	=> "origin/libdrm-2_3-branch",
++     'package'	=> "libdrm-X11R7.4",
++ },
++
++ {
++     'name'	=> "makedepend",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
++     'package'	=> "makedepend",
++ },
++ {
++     'name'	=> "gccmakedep",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
++     'package'	=> "gccmakedep",
++ },
++
++ {
++     'name'	=> "mesa",
++     'path'	=> "mesa",
++     'version'	=> "7.0.3",
++     # Fixme tarball
++     'configure'=>
++     "$ac_demos "	.
++     "$ac_glxtls "	.
++     "$ac_mesadriver "	.
++     "$ac_mesadridir "	.
++     "MKDEP=$final_destdir/bin/gccmakedep "	.
++     "$ac_ttm "		.
++     "$ac_x "		.
++     "$ac_xincludes "	.
++     "$ac_xlibraries "	.
++     ($options {'d'} ? "$ac_debug" : ""),
++     'package'	=> "mesa",
++     'build'	=> ["tcl", "texinfo", "libexpat-devel",
++		    "gccmakedep$package_suffix",
++		    "pixman$package_suffix",
++		    "libpciaccess$package_suffix",
++		    ],
++ },
++ {
++     'name'	=> "mesa",
++     'path'	=> "mesa",
++     # Fixme tarball
++     'configure'=>
++     "$ac_demos "	.
++     "$ac_glxtls "	.
++     "--with-dri-drivers=swrast,i915,i965 " .
++     "$ac_mesadriver "	.
++     "$ac_mesadridir "	.
++     "$ac_ttm "		.
++     "$ac_x "		.
++     "$ac_xincludes "	.
++     "$ac_xlibraries "	.
++     ($options {'d'} ? "$ac_debug" : ""),
++     'commit'	=> "origin/drm-gem",
++     'package'	=> "mesa-branch-gem",
++     'build'	=> ["tcl", "texinfo", "libexpat-devel",
++		    "gccmakedep$package_suffix",
++		    "pixman$package_suffix",
++		    "libpciaccess$package_suffix",
++		    ],
++ },
++ {
++     'name'	=> "mesa",
++     'path'	=> "mesa",
++     # Fixme tarball
++     'package'	=> "mesa-X11R7.4",
++     'commit'	=> "origin/gallium-0.1",
++     'build'	=> ["tcl", "texinfo", "libexpat-devel",
++		    "gccmakedep$package_suffix",
++		    "pixman$package_suffix",
++		    "libpciaccess$package_suffix",
++		    ],
++ },
++
+  {
+      ## XXX Another possible cyclic dependency.
+      ## Build of xserver was using system installed version, but
+@@ -921,7 +1025,8 @@ my @modules =
+      "$ac_builderstr "	.
+      "$ac_dga "		.
+      "$ac_dmx "		.
+-     "$ac_fontcache "	.
++     "$ac_dri2 "	.
++     "$ac_fonts "	.
+      "$ac_glx "		.
+      "$ac_kdrive "	.
+      "$ac_kvesa "	.
+@@ -930,25 +1035,22 @@ my @modules =
+      "$ac_xdmcp "	.
+      "$ac_xdmauth "	.
+      "$ac_xephyr "	.
+-     "$ac_xf86misc "	.
+      "$ac_xf86vid "	.
+      "$ac_xfake "	.
+      "$ac_xfbdev "	.
+      "$ac_xorg "	.
+-     "$ac_xorgcfg "	.
+      "$ac_xsdl "	.
+      "$ac_xselinux "	.
+      "$ac_xvfb "	.
+      ($options{'d'} ? "$ac_debug" : ""),
+      'package'	=> "xserver",
+-     'build'	=> ["libpam-devel", "libgpm-devel", "SDL-devel",
+-		    "libgii-devel", "libhal-devel", "libdbus-devel",
++     'build'	=> ["libpam-devel", "libgpm-devel",
++		    "libhal-devel", "libdbus-devel",
+ 		    "openssl-devel", "bison", "flex",
+ 		    # verify -- required by configure
+ 		    "libxres$package_suffix",
+-		    "dmxproto$package_suffix", "libdmx$package_suffix",
+-		    "libSDL-devel" ],
+-     'requires'	=> ["libpciaccess$package_suffix",],
++		    "dmxproto$package_suffix", "libdmx$package_suffix"],
++     'requires'	=> ["libpciaccess$package_suffix", "freetype2-devel"],
+  },
+ 
+  {
+@@ -968,7 +1070,7 @@ my @modules =
+      "$ac_builderstr "	.
+      "$ac_dga "		.
+      "$ac_dmx "		.
+-     "$ac_fontcache "	.
++     "$ac_dri2 "	.
+      "$ac_glx "		.
+      "$ac_glxtls "	.
+      "$ac_kdrive "	.
+@@ -989,15 +1091,14 @@ my @modules =
+      "$ac_xvfb "	.
+      ($options{'d'} ? "$ac_debug" : ""),
+      'commit'	=> "origin/server-1.5-branch",
+-     'package'	=> "xserver-branch-stable",
+-     'build'	=> ["libpam-devel", "libgpm-devel", "SDL-devel",
+-		    "libgii-devel", "libhal-devel", "libdbus-devel",
++     'package'	=> "xserver-X11R7.4",
++     'build'	=> ["libpam-devel", "libgpm-devel",
++		    "libhal-devel", "libdbus-devel",
+ 		    "openssl-devel", "bison", "flex",
+ 		    # verify -- required by configure
+ 		    "libxres$package_suffix",
+-		    "dmxproto$package_suffix", "libdmx$package_suffix",
+-		    "libSDL-devel" ],
+-     'requires'	=> ["libpciaccess$package_suffix",],
++		    "dmxproto$package_suffix", "libdmx$package_suffix" ],
++     'requires'	=> ["libpciaccess$package_suffix", "freetype2-devel"],
+  },
+ 
+  {
+@@ -1015,92 +1116,15 @@ my @modules =
+      ($options{'d'} ? "$ac_debug" : ""),
+      'commit'	=> "origin/glucose-2",
+      'package'	=> "xserver-branch-glucose",
+-     'build'	=> ["libpam-devel", "libgpm-devel", "SDL-devel",
++     'build'	=> ["libpam-devel", "libgpm-devel",
+ 		    "libgii-devel", "libhal-devel", "libdbus-devel",
+ 		    "openssl-devel", "bison", "flex",
+ 		    # verify -- required by configure
+ 		    "libxres$package_suffix",
+ 		    "dmxproto$package_suffix", "libdmx$package_suffix",
+-		    "libSDL-devel" ],
+-     'requires'	=> ["libpciaccess$package_suffix",],
+-     'skip'	=> "not building",
+- },
+-
+- {
+-     'name'	=> "drm",
+-     'path'	=> "mesa",
+-     'commit'	=> "origin/drm-gem",
+-     'package'	=> "libdrm-branch-gem",
+- },
+- {
+-     'name'	=> "drm",
+-     'path'	=> "mesa",
+-     'version'	=> "2.3.0",
+-     'tarball'	=> "http://dri.freedesktop.org/libdrm/libdrm-%{version}$tgz",
+-     'package'	=> "libdrm",
+- },
+-
+- {
+-     'name'	=> "makedepend",
+-     'path'	=> "xorg/util",
+-     'version'	=> "1.0.1",
+-     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
+-     'package'	=> "makedepend",
+- },
+- {
+-     'name'	=> "gccmakedep",
+-     'path'	=> "xorg/util",
+-     'version'	=> "1.0.2",
+-     'tarball'	=> "$xorg_url/$xorg_util/%{name}-%{version}$tgz",
+-     'package'	=> "gccmakedep",
+- },
+-
+- {
+-     'name'	=> "mesa",
+-     'path'	=> "mesa",
+-     'version'	=> "7.0.3",
+-     # Fixme tarball
+-     'configure'=>
+-     "$ac_demos "	.
+-     "$ac_glxtls "	.
+-     "$ac_mesadriver "	.
+-     "$ac_mesadridir "	.
+-     "$ac_mkdep "	.
+-     "$ac_ttm "		.
+-     "$ac_x "		.
+-     "$ac_xincludes "	.
+-     "$ac_xlibraries "	.
+-     ($options {'d'} ? "$ac_debug" : ""),
+-     'package'	=> "mesa",
+-     'build'	=> ["tcl", "texinfo", "libexpat-devel",
+-		    "gccmakedep$package_suffix",
+-		    "pixman$package_suffix",
+-		    "libpciaccess$package_suffix",
+-		    ],
+- },
+- {
+-     'name'	=> "mesa",
+-     'path'	=> "mesa",
+-     # Fixme tarball
+-     'configure'=>
+-     "$ac_demos "	.
+-     "$ac_glxtls "	.
+-     "--with-dri-drivers=swrast,i915,i965 " .
+-     "$ac_mesadriver "	.
+-     "$ac_mesadridir "	.
+-     "$ac_mkdep "	.
+-     "$ac_ttm "		.
+-     "$ac_x "		.
+-     "$ac_xincludes "	.
+-     "$ac_xlibraries "	.
+-     ($options {'d'} ? "$ac_debug" : ""),
+-     'commit'	=> "origin/drm-gem",
+-     'package'	=> "mesa-branch-gem",
+-     'build'	=> ["tcl", "texinfo", "libexpat-devel",
+-		    "gccmakedep$package_suffix",
+-		    "pixman$package_suffix",
+-		    "libpciaccess$package_suffix",
+ 		    ],
++     'requires'	=> ["libpciaccess$package_suffix","freetype2-devel"],
++     'skip'	=> "not building",
+  },
+ 
+  {
+@@ -1163,6 +1187,7 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "bdftopcf",
++     'build'	=> ["freetype2-devel"],
+  },
+  {
+      'name'	=> "libXvMC",
+@@ -1623,7 +1648,7 @@ my @modules =
+      'path'	=> "xorg/driver",
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+-     'skpip'	=> "vermilion.h:92: error: expected specifier-qualifier-list before 'pciVideoPtr'",
++     'skip'	=> "vermilion.h:92: error: expected specifier-qualifier-list before 'pciVideoPtr'",
+      'package'	=> "xf86-video-vermilion",
+  },
+  {
+@@ -1730,6 +1755,7 @@ my @modules =
+      'version'	=> "0.10.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-sis",
++     'build'	=> ["inputproto$package_suffix"],
+  },
+  {
+      'name'	=> "xf86-video-siliconmotion",
+@@ -1998,6 +2024,14 @@ my @modules =
+      'package'	=> "xf86-input-tek4957",
+  },
+  {
++     'name'	=> "xf86-input-synaptics",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.15.0",
++     #'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-input-synaptics",
++     'build'	=> ["libxi$package_suffix", "kbproto$package_suffix"],
++ },
++ {
+      'name'	=> "xf86-input-summa",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.2.0",
+@@ -2102,6 +2136,7 @@ my @modules =
+      'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-input-evdev",
++     'build'	=> ["libxi$package_suffix"],
+  },
+  {
+      'name'	=> "xf86-input-elographics",
+@@ -2185,6 +2220,7 @@ my @modules =
+ 		    "docbook-dtd41-sgml", "docbook-dtd412-xml",
+ 		    "docbook-dtd42-sgml", "docbook-dtd45-xml",
+ 		    "docbook-dtd44-xml", "docbook-dtd43-xml",
++		    "docbook-dtd42-xml",
+ 		    "intltool", "poppler", "lynx", "texi2html",
+ 		    "libxml2-devel", "libxml2-utils", "checkstyle", "xmltex"],
+  },
+@@ -2427,9 +2463,10 @@ my @modules =
+      'name'	=> "xlogo",
+      'path'	=> "xorg/app",
+      'version'	=> "1.0.1",
+-     'configure'=> "--disable-xprint",
++     'configure'=> "--disable-xprint --with-render",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xlogo",
++     'build'	=> ["fontconfig-devel"],
+  },
+  {
+      'name'	=> "xload",
+@@ -2552,6 +2589,7 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xfd",
++     'build'	=> ["fontconfig-devel"],
+  },
+  {
+      'name'	=> "xf86dga",
+@@ -2602,7 +2640,7 @@ my @modules =
+      'version'	=> "1.1.7",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xdm",
+-     'build'	=> ["fontconfig"],
++     'build'	=> ["fontconfig-devel"],
+  },
+  {
+      'name'	=> "xditview",
+@@ -2645,6 +2683,7 @@ my @modules =
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "xclock",
++     'build'	=> ["fontconfig-devel"],
+  },
+  {
+      'name'	=> "xclipboard",
+@@ -2687,6 +2726,7 @@ my @modules =
+      'version'	=> "1.5",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "x11perf",
++     'build'	=> ["fontconfig-devel"],
+  },
+  {
+      'name'	=> "viewres",
+@@ -2787,6 +2827,7 @@ my @modules =
+      'version'	=> "1.0.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "luit",
++     'build'	=> ["zlib-devel"],
+  },
+  {
+      'name'	=> "listres",
+@@ -3144,6 +3185,7 @@ sub checkout {
+ 		x_system("git checkout master");
+ 		x_chdir($xorg_git_build_dir);
+ 	    }
++	    x_system("mkdir -p `dirname $checkout`");
+ 	    x_system("git-clone $xorg_git_checkout_dir/$prefix $checkout");
+ 	    if ($commit ne "") {
+ 		x_chdir($checkout);
+@@ -3278,30 +3320,41 @@ sub build {
+ 	    x_system("$trace ./autogen.sh $arguments");
+ 	}
+ 	# Mesa special case only?
+-	elsif ($commit ne "gallium-0.1") {
++	elsif ($commit eq "") {
+ 	    x_system("$trace make configure");
+ 	    x_system("$trace ./configure $arguments");
+ 	}
+ 
+-	if ($name eq "mesa" and $commit eq "gallium-0.1") {
+-	    $ENV{LIB_DIR}="$xorg_git_lib_name";
+-	    $ENV{INCLUDE_DIR}="$xorg_git_dest_dir/include";
+-	    $ENV{DRI_DRIVER_DIR}="$xorg_git_dest_dir/$xorg_git_lib_name/dri";
+-	    x_system("$trace make $configure linux-dri");
++	if ($name =~ /^mesa-/) {
++	    x_system("$trace make "				.
++		     "OPT_FLAGS=\\\"-I$xorg_git_dest_dir/include -L$xorg_git_dest_dir/$xorg_git_lib_name $ENV{CFLAGS}\\\" ".
++		     "X11_INCLUDES=-I$final_destdir/include "	.
++		     "EXTRA_LIB_PATH=-L$final_destdir/lib "	.
++		     "LIB_DIR=$xorg_git_lib_name "		.
++		     "INCLUDE_DIR=$xorg_git_dest_dir/include "	.
++		     "DRI_DRIVER_DIR=$xorg_git_dest_dir/$xorg_git_lib_name/dri " .
++		     "MKDEP=$xorg_git_dest_dir/bin/gccmakedep "	.
++		     "linux-dri");
+ 	}
+ 	else {
+-	    x_system("$trace "						.
+-		     ($options{'g'} ? "-l xorg-build.log " : "")	.
++	    x_system("$trace "					.
++		     ($options{'g'} ? "-l xorg-build.log " : "").
+ 		     "make", 1);
+ 	}
+ 
+-	if ($name eq "mesa" and $commit eq "gallium-0.1") {
+-	    x_system("$xorg_git_sudo_command $trace "	.
++	if ($name =~ /^mesa-/) {
++	    x_system("$xorg_git_sudo_command $trace "		.
+ 		     ($options{'g'} ? "-i " : "")		.
+-		     "make $configure install", 1);
++		     "make "					.
++		     "OPT_FLAGS=\\\"-I$xorg_git_dest_dir/include -L$xorg_git_dest_dir/$xorg_git_lib_name $ENV{CFLAGS}\\\" ".
++		     "X11_INCLUDES=-I$final_destdir/include "	.
++		     "EXTRA_LIB_PATH=-L$final_destdir/lib "	.
++		     "INSTALL_DIR=$xorg_git_dest_dir "		.
++		     "DRI_DRIVER_INSTALL_DIR=$xorg_git_dest_dir/$xorg_git_lib_name/dri " .
++		     "install", 1);
+ 	}
+ 	else {
+-	    x_system("$xorg_git_sudo_command $trace "	.
++	    x_system("$xorg_git_sudo_command $trace "		.
+ 		     ($options{'g'} ? "-i " : "")		.
+ 		     "make install", 1);
+ 	}
+@@ -3465,7 +3518,7 @@ sub rpm {
+     		s/-//g;
+     		# Not checking utc
+     		if ($_+0 > $version) {
+-    		    $version = $_+0;
++		    $version = $_+0;
+     		}
+     	    }
+     	}
+@@ -3491,6 +3544,13 @@ sub rpm {
+ 	# package could still require a rebuild.
+ 	return unless (defined($options{'f'}));
+ 
++	# Commit may have been pushed late...
++	if ($commit ne $old_commit and $version < $old_version) {
++	    print(STDERR "using today's date as commit seems to be pushed late.\n");
++	    $version = `date +%Y%m%d`;
++	    chomp($version);
++	}
++
+ 	$release = `head -4 $xorg_git_rpm_dir/$package/SPECS/$package.spec | tail -1 | sed -e 's/Release: %mkrel //'`;
+ 	$release = $release+0 + 1 if ($options{'f'});
+     }
+@@ -3511,6 +3571,7 @@ sub rpm {
+     open(SPEC, ">SPECS/$package.spec") or die("Cannot create $package.spec\n");
+ 
+     print(SPEC "#$version:$commit\n");
++    print(SPEC "%define _requires_exceptions lib\n");
+     print(SPEC "Name: $package\n");
+     print(SPEC "Version: $version\n");
+     print(SPEC "Release: %mkrel $release\n");
+@@ -3519,13 +3580,24 @@ sub rpm {
+     print(SPEC "URL: http://xorg.freedesktop.org\n");
+     print(SPEC "Source: $package.tar.bz2\n");
+     print(SPEC "License: MIT\n");
+-    print(SPEC "BuildRoot: %{_tmppath}/%{name}-root\n");
+-
+-    if ($name =~ m/xf86-video-(amd|geode)/) {
++    print(SPEC "BuildRoot: %{_tmppath}/%{name}-root\n\n");
++    print(SPEC "BuildConflicts: x11-server-devel\n");
++    print(SPEC "BuildConflicts: x11-proto-devel\n");
++    print(SPEC "BuildConflicts: libdrm-devel\n");
++    print(SPEC "BuildConflicts: GL-devel\n");
++    print(SPEC "BuildConflicts: libxcb-devel\n");
++    print(SPEC "BuildConflicts: libpciaccess-devel\n");
++    print(SPEC "BuildConflicts: libice-devel\n");
++    print(SPEC "BuildConflicts: libxau-devel\n");
++    print(SPEC "BuildConflicts: libxdmcp-devel\n\n");
++
++    ## XXX Hopefully temporary kludge: x86_64 doesn't accept contrib/testing
++    ## packages as dependencies anymore...
++    #if ($name =~ m/xf86-video-(amd|geode)/) {
+ 	print(SPEC "ExclusiveArch: %{ix86}\n");
+-    }
++    #}
+ 
+-    $rpmname =~ /(branch.*)/;
++    $rpmname =~ /(branch.*|X11R7.4)/;
+     if ($branches{$1}) {
+ 	my $suffix = $1;
+ 	my @packages = @{$branches{$suffix}{'packages'}};
+@@ -3533,12 +3605,7 @@ sub rpm {
+ 	    # Don't build a fontconfig snapshot package anymore on Mandriva
+ 	    next if ($requires eq "fontconfig");
+ 
+-	    ## Ugly hack to compile with headers that define i915 symbols
+-
+-	    if ($rpmname eq "mesa-branch-stable" and $requires eq "libdrm") {
+-		$requires = "libdrm-branch-gem";
+-	    }
+-	    elsif (grep($_ eq $requires, @packages)) {
++	    if (grep($_ eq $requires, @packages)) {
+ 		$requires .= "-$suffix";
+ 	    }
+ 	    print(SPEC "BuildRequires: $requires$package_suffix\n");
+@@ -3588,9 +3655,29 @@ sub rpm {
+     }
+ 
+     if ($name eq "mesa") {
+-	print(SPEC "\nEXTRA_LIB_PATH=-L$package_destdir/$xorg_git_lib_name\n");
+-	print(SPEC "export EXTRA_LIB_PATH\nmake configure\n");
+-	print(SPEC "./configure --prefix=$package_destdir $ac_libdir $configure");
++	if ($git_commit) {
++	    $make= "make "				.
++	    "OPT_FLAGS=\"-I$package_destdir/include $ENV{CFLAGS}\" ".
++	    "X11_INCLUDES=-I$package_destdir/include "	.
++	    "EXTRA_LIB_PATH=-L$package_destdir/lib "	.
++	    "LIB_DIR=lib "				.
++	    "INCLUDE_DIR=$package_destdir/include "	.
++	    "DRI_DRIVER_DIR=$package_destdir/lib/dri "	.
++	    "MKDEP=$package_destdir/bin/gccmakedep "	.
++	    "linux-dri";
++	    $makeinstall = "make "			.
++	    "OPT_FLAGS=\"-I$package_destdir/include $ENV{CFLAGS}\" ".
++	    "X11_INCLUDES=-I$package_destdir/include "	.
++	    "EXTRA_LIB_PATH=-L$package_destdir/lib "	.
++	    "INSTALL_DIR=$package_destdir "		.
++	    "DRI_DRIVER_INSTALL_DIR=$final_destdir/lib/dri " .
++	    "install";
++	}
++	else {
++	    print(SPEC "\nEXTRA_LIB_PATH=-L$package_destdir/$xorg_git_lib_name\n");
++	    print(SPEC "export EXTRA_LIB_PATH\nmake configure\n");
++	    print(SPEC "./configure --prefix=$package_destdir $ac_libdir $configure");
++	}
+     }
+     else {
+ 	print(SPEC "\n./autogen.sh --prefix=$package_destdir $ac_libdir $configure");
+@@ -3692,11 +3779,7 @@ sub rpm {
+     close(FILES);
+     ## Symlinks should really be handled in xorg-trace.pl...
+     if ($name eq "xserver") {
+-	print(SPEC "$package_destdir/bin/X\n$package_destdir/bin/in*\n");
+-	print(SPEC "$package_destdir/bin/out*\n");
+-    }
+-    elsif ($name eq "fontconfig") {
+-	print(SPEC "$package_destdir/etc/fonts/conf.d/*\n");
++	print(SPEC "$package_destdir/bin/X\n");
+     }
+     elsif ($name eq "xf86-video-intel") {
+ 	print(SPEC "$package_destdir/lib/xorg/modules/drivers/i810_drv.so\n");
+@@ -3811,11 +3894,18 @@ if ($options{'n'}) {
+ 	}
+     }
+ }
+-if ($options{'p'}) {
++elsif ($options{'p'}) {
+     foreach (@modules) {
+ 	$_->{'skip'} = "yes" unless ($_->{'package'} eq $options{'p'});
+     }
+ }
++# Skip any packages with branches by default
++else {
++    foreach (@modules) {
++	$_->{'skip'} = "yes" if (defined($_->{'commit'}));
++    }
++}
++
+ #  Add skip for modules without a 'package' entry
+ if ($rpm) {
+     rpm_init() if ($command eq "rpm");
+diff --git a/xorg-scripts/xorg-symbols.pl b/xorg-scripts/xorg-symbols.pl
+index 81dfc79..f9a7ff7 100755
+--- a/xorg-scripts/xorg-symbols.pl
++++ b/xorg-scripts/xorg-symbols.pl
+@@ -160,7 +160,7 @@ unless (defined($prefix)) {
+ }
+ 
+ my $module_path = $options{'m'};
+-my $module_path = "$prefix/$libname/xorg/modules"
++$module_path = "$prefix/$libname/xorg/modules"
+     unless (defined($module_path));
+ 
+ $ENV{LD_LIBRARY_PATH} = "$prefix/$libname:$ENV{LD_LIBRARY_PATH}";
+-- 
+1.5.6
+

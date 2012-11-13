@@ -1,0 +1,300 @@
+From cc32d2679310a3875013cdaa6f84fc1b02272489 Mon Sep 17 00:00:00 2001
+From: Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
+Date: Fri, 9 May 2008 18:45:25 -0300
+Subject: [PATCH] Update for rpm build and current git master.
+
+---
+ xorg-scripts/xorg-build.pl |  204 ++++++++++++++++++++++----------------------
+ xorg-scripts/xorg-trace.pl |    2 +-
+ 2 files changed, 104 insertions(+), 102 deletions(-)
+
+diff --git a/xorg-scripts/xorg-build.pl b/xorg-scripts/xorg-build.pl
+index 0ad182b..b333e02 100755
+--- a/xorg-scripts/xorg-build.pl
++++ b/xorg-scripts/xorg-build.pl
+@@ -784,7 +784,13 @@ my @modules =
+      ($options {'d'} ? "$ac_debug" : ""),
+      'package'	=> "mesa",
+      'build'	=> ["tcl", "texinfo", "libexpat-devel",
+-		    "gccmakedep$package_suffix"],
++		    "gccmakedep$package_suffix",
++
++		    # Hopefully a temporary only problem (cyclic dependency)
++		    # due to libGLcore...
++		    "xserver$package_suffix"
++
++		    ],
+  },
+  {
+      'name'	=> "xf86driproto",
+@@ -3044,7 +3050,6 @@ sub build {
+ 	}
+ 	# Mesa special case only?
+ 	else {
+-	    x_system("$trace autoconf");
+ 	    x_system("$trace make configure");
+ 	    x_system("$trace ./configure $arguments");
+ 	}
+@@ -3057,6 +3062,16 @@ sub build {
+ 		 ($options{'g'} ? "-i " : "")		.
+ 		 "make install", 1);
+ 
++	# more Mesa
++	if ($name eq "mesa") {
++	    x_system("$trace "				.
++		     ($options{'g'} ? "-l " : "")	.
++		     "xorg-build.log make glcore", 1);
++	    x_system("$xorg_git_sudo_command $trace "	.
++		     ($options{'g'} ? "-i " : "")	.
++		     "make glcore-install", 1);
++	}
++
+ 	if ($options{'g'}) {
+ 	    x_system("$xorg_git_sudo_command mkdir -p $xorg_git_deps_dir/$path");
+ 	    foreach my $ext ("deps", "files", "deps.ext", "files.ext") {
+@@ -3235,7 +3250,8 @@ sub rpm {
+     if ($name ne "xkeyboard-config") {
+ 	$tmp = $/;
+ 	$/ = undef;
+-	my $data = `git-log --date=short | head -3`;
++	# Was using head -3, but that causes problems with Merges in last commit
++	my $data = `git-log --date=short | head -4`;
+ 	$/ = $tmp;
+ 
+ 	$data =~ m/commit\s(\S+)/;
+@@ -3285,23 +3301,23 @@ sub rpm {
+     }
+ 
+     x_chdir("$xorg_git_rpm_dir/$package");
++
+     open(SPEC, ">SPECS/$package.spec") or die("Cannot create $package.spec\n");
+-    print(SPEC
+-	  "#$version:$commit
+-Name: $package
+-Version: $version
+-Release: %mkrel 1
+-Summary: $summary
+-Group: System/X11
+-URL: http://xorg.freedesktop.org
+-Source: $package.tar.bz2
+-"	.
+-	  ($name eq "mesa" ? "Source1: mesa-source.tar.bz2
+-" : "")	.
+-"License: MIT
+-BuildRoot: %{_tmppath}/%{name}-root
+-
+-");
++
++    print(SPEC "#$version:$commit\n");
++    print(SPEC "Name: $package\n");
++    print(SPEC "Version: $version\n");
++    print(SPEC "Release: %mkrel 1\n");
++    print(SPEC "Summary: $summary\n");
++    print(SPEC "Group: System/X11\n");
++    print(SPEC "URL: http://xorg.freedesktop.org\n");
++    print(SPEC "Source: $package.tar.bz2\n");
++    if ($name eq "mesa") {
++	print(SPEC "Source1: mesa-source.tar.bz2\n");
++    }
++    print(SPEC "License: MIT\n");
++    print(SPEC "BuildRoot: %{_tmppath}/%{name}-root\n");
++
+     foreach (@{$rpm_build_requires{$rpmname}}) {
+ 	print(SPEC "BuildRequires: $_$package_suffix\n");
+     }
+@@ -3313,58 +3329,50 @@ BuildRoot: %{_tmppath}/%{name}-root
+     }
+ 
+     my $make = $name eq "libXtst" ? "make" : "%make";
++    my $makeinstall = "%makeinstall_std";
+ 
+-    print(SPEC "
+-%description
+-$package is a snapshot of the code from
+-\"$summary \\
+-$path" . ($path ne "" ? "/" : "") . "$name\"
+-
+-%prep
+-%setup -q -n $package
+-
+-%build
+-PATH=$package_destdir/bin:\$PATH
+-PKG_CONFIG_PATH=$package_destdir/$xorg_git_lib_name/pkgconfig
+-LD_LIBRARY_PATH=$package_destdir/$xorg_git_lib_name:\$LD_LIBRARY_PATH
+-"	. ($name ne "macros" ? "ACLOCAL_LOCALDIR=$package_destdir/share/aclocal
+-ACLOCAL=\"aclocal -I \$ACLOCAL_LOCALDIR\"
+-export PATH PKG_CONFIG_PATH LD_LIBRARY_PATH ACLOCAL_LOCALDIR ACLOCAL" :
+-"export PATH PKG_CONFIG_PATH LD_LIBRARY_PATH")		.
+-	($name eq "mesa" ? 
+-"
+-EXTRA_LIB_PATH=-L$package_destdir/$xorg_git_lib_name
+-export EXTRA_LIB_PATH
+-autoconf
+-make configure
+-./configure --prefix=$package_destdir $ac_libdir $configure" :
+-"
+-./autogen.sh --prefix=$package_destdir $ac_libdir $configure")	.
+-"
+-
+-$make
+-
+-%install
+-rm -fr %{buildroot}
+-%makeinstall_std
+-"	.
+-	  ($name eq "mesa" ? "
+-%ifnarch %{sparc}
+-rm -f %{buildroot}/$package_destdir/lib/dri/ffb_dri.so
+-%endif
+-pushd %{buildroot}
+-mkdir -p %{buildroot}/$package_destdir/src
+-cd %{buildroot}/$package_destdir/src
+-tar jxf %{SOURCE1}
+-popd
+-" : "")	.
+-"
+-%clean
+-rm -rf %{buildroot}
+-
+-%files
+-%defattr(-,root,root)
+-");
++    if ($name eq "mesa") {
++	$make = "$make\nmake glcore";
++	$makeinstall = "$makeinstall glcore";
++    }
++
++    print(SPEC "\n%description\n$package is a snapshot of the code from\n");
++    print(SPEC "\"$summary $path" . ($path ne "" ? "/" : "") . "$name\"\n");
++    print(SPEC "\n%prep\n%setup -q -n $package\n\n%build\n");
++    print(SPEC "\nPATH=$package_destdir/bin:\$PATH\n");
++    print(SPEC "PKG_CONFIG_PATH=$package_destdir/$xorg_git_lib_name/pkgconfig:\$PKG_CONFIG_PATH\n");
++    print(SPEC "LD_LIBRARY_PATH=$package_destdir/$xorg_git_lib_name:\$LD_LIBRARY_PATH\n");
++    if ($name ne "macros") {
++	print(SPEC "ACLOCAL_LOCALDIR=$package_destdir/share/aclocal\n");
++	print(SPEC "ACLOCAL=\"aclocal -I \$ACLOCAL_LOCALDIR\"\n");
++	print(SPEC "export PATH PKG_CONFIG_PATH LD_LIBRARY_PATH ACLOCAL_LOCALDIR ACLOCAL\n");
++    }
++    else {
++	print(SPEC "export PATH PKG_CONFIG_PATH LD_LIBRARY_PATH");
++    }
++    if ($name eq "xserver") {
++	print(SPEC "CFLAGS=\"-DDEFAULT_CONF_PATH=\\\\\"\\\"$package_destdir/etc/X11\\\\\"\\\" -DROOT_CONFIGPATH=DEFAULT_CONF_PATH -DUSER_CONFIGPATH=DEFAULT_CONF_PATH\"\n");
++	print(SPEC "export CFLAGS\n");
++    }
++
++    if ($name eq "mesa") {
++	print(SPEC "\nEXTRA_LIB_PATH=-L$package_destdir/$xorg_git_lib_name\n");
++	print(SPEC "export EXTRA_LIB_PATH\nmake configure\n");
++	print(SPEC "./configure --prefix=$package_destdir $ac_libdir $configure");
++    }
++    else {
++	print(SPEC "\n./autogen.sh --prefix=$package_destdir $ac_libdir $configure");
++    }
++
++    print(SPEC "\n\n$make\n\n%install\nrm -fr %{buildroot}\n$makeinstall\n");
++
++    if ($name eq "mesa") {
++	print(SPEC "\n%ifnarch %{sparc}\nrm -f %{buildroot}/$package_destdir/lib/dri/ffb_dri.so\n%endif\n");
++	print(SPEC "pushd %{buildroot}\nmkdir -p %{buildroot}/$package_destdir/src\n");
++	print(SPEC "cd %{buildroot}/$package_destdir/src\ntar jxf %{SOURCE1}\npopd\n");
++    }
++
++    print(SPEC "\n%clean\nrm -rf %{buildroot}\n\n%files\n%defattr(-,root,root)\n");
+ 
+     if ($name eq "libXaw") {
+ 	print(SPEC "$package_destdir/lib/libXaw.so*\n");
+@@ -3384,52 +3392,46 @@ rm -rf %{buildroot}
+ 	s/(share\/man\/man\d\/.*\.\d)$/$1\*/;
+ 	if ($name eq "mesa" and
+ 	    m/dri\/(i810|s3v|sis|trident)_dri\.so/) {
+-	    print(SPEC "%ifarch %{ix86}
+-$_%endif
+-");
++	    print(SPEC "%ifarch %{ix86}\n$_%endif\n");
+ 	}
+-	elsif ($name eq "xserver" and
+-	       m/bin\/X(ati|chips|i810|mach64|mga|nvidia|pm2|r128|smi|vesa|via)?$/) {
+-	    print(SPEC "%ifarch %{ix86} alpha
+-$_%endif
+-");
++	elsif ($name eq "xserver") {
++	    if (m/bin\/X(ati|chips|i810|mach64|mga|nvidia|pm2|r128|smi|vesa|via)?$/) {
++		print(SPEC "%ifarch %{ix86} alpha\n$_%endif\n");
++	    }
++	    # XXX Install setuid XServer
++	    elsif (m/^($package_destdir\/bin\/Xorg)$/) {
++		print(SPEC "%attr(4755, root, root) $_");
++	    }
++	    else {
++		print(SPEC $_);
++	    }
+ 	}
+ 	elsif ($name eq "xkeyboard-config" and
+ 	       m/rules\/(sgi|sun)(.xml)?/) {
+ 	    # say hi ... Fixme
++	}
+ 	else {
+ 	    print(SPEC $_);
+ 	}
+     }
+     close(FILES);
+     if ($name eq "xserver") {
+-	print(SPEC "
+-$package_destdir/bin/X
+-$package_destdir/bin/in*
+-$package_destdir/bin/out*
+-");
++	print(SPEC "$package_destdir/bin/X\n$package_destdir/bin/in*\n");
++	print(SPEC "$package_destdir/bin/out*\n");
+     }
+     elsif ($name eq  "mesa") {
+-	print(SPEC "
+-%package source
+-Summary: Mesa source files required to compile the X Server
+-Group: Development/C
+-
+-%description source
+-Mesa is an OpenGL 2+ compatible 3D graphics library.
+-
+-Source files required to compile the X Server.
+-
+-%files source
+-%defattr(-,root,root)
+-$package_destdir/src/*
+-");
++	print(SPEC "\n%package source\nSummary: Mesa source files required to compile the X Server\n");
++	print(SPEC "Group: Development/C\n\n");
++	print(SPEC "%description source\n");
++	print(SPEC "Mesa is an OpenGL 2+ compatible 3D graphics library.\n\n");
++	print(SPEC "Source files required to compile the X Server.\n\n");
++	print(SPEC "%files source\n%defattr(-,root,root)\n");
++	print(SPEC "$package_destdir/src/*\n");
+     }
+     elsif ($name eq "xkeyboard-config") {
+-	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg
+-$package_destdir/share/X11/xkb/rules/xorg.lst
+-$package_destdir/share/X11/xkb/rules/xorg.xml
+-");
++	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg\n");
++	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg.lst\n");
++	print(SPEC "$package_destdir/share/X11/xkb/rules/xorg.xml\n");
+     }
+ 
+     close(SPEC);
+diff --git a/xorg-scripts/xorg-trace.pl b/xorg-scripts/xorg-trace.pl
+index a6b8ed8..0d5ca13 100755
+--- a/xorg-scripts/xorg-trace.pl
++++ b/xorg-scripts/xorg-trace.pl
+@@ -98,7 +98,7 @@ sub x_log {
+     close(CMD);
+ 
+     if ($log ne "") {
+-	open(LOG, ">$logname");
++	open(LOG, ">>$logname");
+ 	print(LOG $log);
+ 	close(LOG);
+     }
+-- 
+1.5.6
+

@@ -1,0 +1,378 @@
+From c144f2dae8687f8072d982e1a392f412c95bdd2a Mon Sep 17 00:00:00 2001
+From: Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
+Date: Thu, 15 May 2008 18:21:03 -0300
+Subject: [PATCH] Update rpm build to match Mandriva cooker.
+
+  Also update versions of packages (version of available tarballs), and
+some build errors that were introduced when making changes to generate
+rpm specs and tarballs.
+---
+ xorg-scripts/xorg-build.pl |  109 +++++++++++++++++++++++++++++---------------
+ 1 files changed, 72 insertions(+), 37 deletions(-)
+
+diff --git a/xorg-scripts/xorg-build.pl b/xorg-scripts/xorg-build.pl
+index b333e02..d5f88f2 100755
+--- a/xorg-scripts/xorg-build.pl
++++ b/xorg-scripts/xorg-build.pl
+@@ -327,6 +327,7 @@ my $ac_buildaddr  = "--with-builder-addr="			.
+     ($rpm ? "\$USER\@\`hostname\`" : $git_user_email);
+ my $ac_builderstr;
+ my $ac_kvesa;
++my $ac_mesapath	  = "--with-mesa-source=";
+ if ($rpm) {
+     $ac_kvesa	  = " \\
+ %ifarch %%{x86} alpha
+@@ -334,13 +335,13 @@ if ($rpm) {
+ %endif
+ ";
+     $ac_builderstr = "--with-builderstring=\"\`uname -onri | sed -e 's/ /_/g'\`\"";
++    $ac_mesapath = "$ac_mesapath$final_destdir/src/Mesa";
+ }
+ else {
+     $ac_kvesa	   = $xorg_git_lib_name eq "lib" ? "" : "--enable-kdrive-vesa";
+     $ac_builderstr = `uname -a`; chomp($ac_builderstr); $ac_builderstr = "--with-builderstring=\"\\\"$ac_builderstr\\\"\"";
++    $ac_mesapath = "$ac_mesapath$final_destdir/$xorg_git_build_dir/mesa/mesa";
+ }
+-my $ac_mesapath	  = "--with-mesa-source=$final_destdir/"	.
+-    ($rpm ? "src/Mesa" : "mesa/mesa");
+ my $ac_dga	  = "--enable-dga";
+ my $ac_dmx	  = "--enable-dmx";
+ my $ac_fontcache  = "--enable-fontcache";
+@@ -381,6 +382,11 @@ my $ac_debug	  = "--enable-debug";
+ # xphelloworld
+ my $ac_motiflibs  = "--with-motif-libraries=no";
+ 
++# compiz
++my $ac_kde4	  = "--enable-kde4";
++my $ac_kconfig	  = $rpm ? "--disable-kconfig" : "";
++my $ac_gnome	  = $rpm ? "--disable-gnome" : "";
++
+ # xkeyboard-config
+ my $ac_xkbcomplnk = "--disable-xkbcomp-symlink";
+ my $ac_xkbrules   = "--enable-compat-rules";
+@@ -424,7 +430,7 @@ my @modules =
+  {
+      'name'	=> "libxtrans",
+      'path'	=> "xorg/lib",
+-     'version'	=> "1.1",
++     'version'	=> "1.2",
+      'tarball'	=> "$xorg_url/$xorg_lib/xtrans-%{version}$tgz",
+      'package'	=> "libxtrans",
+  },
+@@ -680,7 +686,7 @@ my @modules =
+  {
+      'name'	=> "libxkbfile",
+      'path'	=> "xorg/lib",
+-     'version'	=> "1.0.4",
++     'version'	=> "1.0.5",
+      'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
+      'package'	=> "libxkbfile",
+  },
+@@ -788,8 +794,9 @@ my @modules =
+ 
+ 		    # Hopefully a temporary only problem (cyclic dependency)
+ 		    # due to libGLcore...
+-		    "xserver$package_suffix"
+-
++		    "xserver$package_suffix",
++		    "pixman$package_suffix",
++		    "libpciaccess$package_suffix"
+ 		    ],
+  },
+  {
+@@ -972,6 +979,7 @@ my @modules =
+ 		    # verify -- required by configure
+ 		    "libxres$package_suffix",
+ 		    "dmxproto$package_suffix", "libdmx$package_suffix"],
++     'requires'	=> ["libpciaccess$package_suffix",],
+  },
+  {
+      'name'	=> "libXprintUtil",
+@@ -1419,7 +1427,7 @@ my @modules =
+      ### FIXME need to find official tarball url, if any
+      'name'	=> "xf86-video-xgixp",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.7.99.2",
++     'version'	=> "1.7.99.3",
+      'package'	=> "xf86-video-xgixp",
+  },
+  {
+@@ -1439,14 +1447,14 @@ my @modules =
+  {
+      'name'	=> "xf86-video-voodoo",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.1",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-voodoo",
+  },
+  {
+      'name'	=> "xf86-video-vmware",
+      'path'	=> "xorg/driver",
+-     'version'	=> "10.16.0",
++     'version'	=> "10.16.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-vmware",
+  },
+@@ -1466,6 +1474,13 @@ my @modules =
+      'package'	=> "xf86-video-vga",
+  },
+  {
++     'name'	=> "xf86-video-vermilion",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'package'	=> "xf86-video-vermilion",
++ },
++ {
+      'name'	=> "xf86-video-vesa",
+      'path'	=> "xorg/driver",
+      'version'	=> "1.3.0",
+@@ -1475,7 +1490,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-v4l",
+      'path'	=> "xorg/driver",
+-     'version'	=> "0.1.1",
++     'version'	=> "0.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-v4l",
+  },
+@@ -1489,7 +1504,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-trident",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.2.4",
++     'version'	=> "1.3.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-trident",
+  },
+@@ -1559,14 +1574,14 @@ my @modules =
+  {
+      'name'	=> "xf86-video-sisusb",
+      'path'	=> "xorg/driver",
+-     'version'	=> "0.8.1",
++     'version'	=> "0.9.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-sisusb",
+  },
+  {
+      'name'	=> "xf86-video-sis",
+      'path'	=> "xorg/driver",
+-     'version'	=> "0.9.4",
++     'version'	=> "0.10.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-sis",
+  },
+@@ -1608,7 +1623,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-radeonhd",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-radeonhd",
+  },
+@@ -1623,7 +1638,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-nv",
+      'path'	=> "xorg/driver",
+-     'version'	=> "2.1.8",
++     'version'	=> "2.1.9",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-nv",
+  },
+@@ -1667,7 +1682,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-intel",
+      'path'	=> "xorg/driver",
+-     'version'	=> "2.2.1",
++     'version'	=> "2.3.1",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-intel",
+  },
+@@ -1696,7 +1711,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-i740",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.1.0",
++     'version'	=> "1.2.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-i740",
+  },
+@@ -1717,7 +1732,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-geode",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.0.0",
++     'version'	=> "2.9.0",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-video-geode",
+  },
+@@ -1795,7 +1810,7 @@ my @modules =
+  {
+      'name'	=> "xf86-video-amd",
+      'path'	=> "xorg/driver",
+-     'version'	=> "2.7.7.6",
++     'version'	=> "2.7.7.7",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      #     'skip'	=> "amd_gx_driver.c:331: error: 'pciVideoRec' undeclared (first use in this function)",
+      'package'	=> "xf86-video-amd",
+@@ -1901,7 +1916,7 @@ my @modules =
+  {
+      'name'	=> "xf86-input-joystick",
+      'path'	=> "xorg/driver",
+-     'version'	=> "1.3.1",
++     'version'	=> "1.3.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-input-joystick",
+  },
+@@ -1995,7 +2010,6 @@ my @modules =
+      'version'	=> "1.2.2",
+      'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
+      'package'	=> "xf86-input-acecad",
+-     #1*2*3*4*5*6*7*8*
+  },
+  {
+      'name'	=> "xorg-sgml-doctools",
+@@ -2010,11 +2024,14 @@ my @modules =
+      'version'	=> "1.4",
+      'tarball'	=> "$xorg_url/$xorg_doc/%{name}-%{version}$tgz",
+      'package'	=> "xorg-docs",
+-     ## XXX Test and make sure it works later...
+-     #'configure'=> "--enable-ps --enable-html",
++     'configure'=> "--enable-ps --enable-html --enable-txt",
+      'build'	=> ["docbook-utils", "docbook-utils-pdf",
+-		    "docbook-dtd31-sgml", "docbook-dtd41-sgml",
+-		    "libxml2-devel", "libxml2-utils"],
++		    "linuxdoc-tools", "docbook-dtd31-sgml",
++		    "docbook-dtd41-sgml", "docbook-dtd412-xml",
++		    "docbook-dtd42-sgml", "docbook-dtd45-xml",
++		    "docbook-dtd44-xml", "docbook-dtd43-xml",
++		    "intltool", "poppler", "lynx", "texi2html",
++		    "libxml2-devel", "libxml2-utils", "checkstyle", "xmltex"],
+  },
+  {
+      'name'	=> "cursors",
+@@ -2180,6 +2197,7 @@ my @modules =
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'configure'=> "$ac_motiflibs",
+      'package'	=> "xphelloworld",
++     'requires'	=> ["libxprintapputil$package_suffix"],
+  },
+  {
+      'name'	=> "xmore",
+@@ -2584,7 +2602,7 @@ my @modules =
+      'version'	=> "1.0.1",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
+      'package'	=> "proxymngr",
+-     'build'	=> ["liblbxutil$package_suffix", ],
++     'build'	=> ["liblbxutil$package_suffix", "lbxproxy$package_suffix" ],
+  },
+  {
+      'name'	=> "oclock",
+@@ -2706,14 +2724,16 @@ my @modules =
+      'version'	=> "0.7.3",
+      'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}.tar.gz",
+      'package'	=> "compiz",
++     'configure'=> "$ac_kde4 $ac_kconfig $ac_gnome",
+      'build'	=> ["dbus-glib-devel", "libGConf2-devel",
+ 		    "libgnome-window-settings-devel",
+ 		    "libwnck-devel", "metacity-devel", "pango-devel",
+ 		    "gnome-desktop-devel", "startup-notification-devel",
+-		    "kdebase-devel", "bonoboui-devel", "libxslt-devel",
+-		    "libxslt-proc", "librsvg-devel", "libcairo-devel",
+-		    "libsvg-cairo-devel", "libdbus-qt-1-devel",
+-		    "fuse-devel", "intltool"],
++		    "kdebase4-workspace-devel",
++		    "kde3-macros", "kdebase3-devel", "bonoboui-devel",
++		    "libxslt-devel", "libxslt-proc", "librsvg-devel",
++		    "libcairo-devel", "libsvg-cairo-devel",
++		    "libdbus-qt-1-devel", "fuse-devel", "intltool"],
+  },
+  {
+      'name'	=> "bitmap",
+@@ -2767,6 +2787,7 @@ my @modules =
+      'version'	=> "0.0.999",
+      # Fixme tarball
+      'package'	=> "xf86-video-avivo",
++     'requires'	=> "libpciaccess$package_suffix",
+  },
+ 
+ 
+@@ -3054,9 +3075,9 @@ sub build {
+ 	    x_system("$trace ./configure $arguments");
+ 	}
+ 
+-	x_system("$trace "				.
+-		 ($options{'g'} ? "-l " : "")		.
+-		 "xorg-build.log make", 1);
++	x_system("$trace "						.
++		 ($options{'g'} ? "-l xorg-build.log " : "")		.
++		 "make", 1);
+ 
+ 	x_system("$xorg_git_sudo_command $trace "	.
+ 		 ($options{'g'} ? "-i " : "")		.
+@@ -3307,7 +3328,7 @@ sub rpm {
+     print(SPEC "#$version:$commit\n");
+     print(SPEC "Name: $package\n");
+     print(SPEC "Version: $version\n");
+-    print(SPEC "Release: %mkrel 1\n");
++    print(SPEC "Release: %mkrel 4\n");
+     print(SPEC "Summary: $summary\n");
+     print(SPEC "Group: System/X11\n");
+     print(SPEC "URL: http://xorg.freedesktop.org\n");
+@@ -3318,6 +3339,10 @@ sub rpm {
+     print(SPEC "License: MIT\n");
+     print(SPEC "BuildRoot: %{_tmppath}/%{name}-root\n");
+ 
++    if ($name =~ m/xf86-video-(amd|geode)/) {
++	print(SPEC "ExclusiveArch: %{ix86}\n");
++    }
++
+     foreach (@{$rpm_build_requires{$rpmname}}) {
+ 	print(SPEC "BuildRequires: $_$package_suffix\n");
+     }
+@@ -3328,12 +3353,15 @@ sub rpm {
+ 	print(SPEC "Requires: $_\n");
+     }
+ 
+-    my $make = $name eq "libXtst" ? "make" : "%make";
++    my $make = $name eq "libXtst" or $name eq "xorg-docs" ? "make" : "%make";
+     my $makeinstall = "%makeinstall_std";
+ 
+     if ($name eq "mesa") {
+ 	$make = "$make\nmake glcore";
+-	$makeinstall = "$makeinstall glcore";
++	$makeinstall = "$makeinstall glcore-install";
++    }
++    elsif ($package =~ /^font-/) {
++	$makeinstall = "$makeinstall\nrm -f \`find %{buildroot} -type f -name fonts.dir -o -name fonts.scale\`\n";
+     }
+ 
+     print(SPEC "\n%description\n$package is a snapshot of the code from\n");
+@@ -3390,6 +3418,13 @@ sub rpm {
+ 	s/lib([a-zA-Z0-9-]+)\.so\.\d+\.\d+(\.\d+)?$/lib$1.so\*/;
+ 	# Manpages are compressed
+ 	s/(share\/man\/man\d\/.*\.\d)$/$1\*/;
++
++	# xorg-docs compress ps
++	s/(share\/X11\/doc\/.*\.ps)$/$1\*/;
++
++	# fonts.scale and fonts.dir are dynammically generated
++	next if (m/\/fonts\.(scale|dir)$/);
++
+ 	if ($name eq "mesa" and
+ 	    m/dri\/(i810|s3v|sis|trident)_dri\.so/) {
+ 	    print(SPEC "%ifarch %{ix86}\n$_%endif\n");
+@@ -3530,7 +3565,7 @@ if ($command eq "update" and not $options{'c'} and -f $git_last_update) {
+     }
+ }
+ foreach (@modules) {
+-    print(STDERR "--> $_->{name}\n");
++    print(STDERR "--> $_->{name}\n") unless ($options{'n'});
+     my $function = $table{$command};
+     $function->($_) unless ($_->{'skip'});
+ }
+-- 
+1.5.6
+

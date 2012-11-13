@@ -1,0 +1,3686 @@
+From a4d38ef552d153af9bc62f2b7e1ada5a9a4cdc94 Mon Sep 17 00:00:00 2001
+From: Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
+Date: Thu, 13 Mar 2008 14:44:57 -0300
+Subject: [PATCH] Add a set of scripts to allow easier build of xorg latest sources.
+
+---
+ xorg-scripts/xorg-build.pl    | 2713 +++++++++++++++++++++++++++++++++++++++++
+ xorg-scripts/xorg-deps.pl     |  126 ++
+ xorg-scripts/xorg-scripts.txt |   93 ++
+ xorg-scripts/xorg-symbols.pl  |  516 ++++++++
+ xorg-scripts/xorg-trace.pl    |  187 +++
+ 5 files changed, 3635 insertions(+), 0 deletions(-)
+ create mode 100755 xorg-scripts/xorg-build.pl
+ create mode 100755 xorg-scripts/xorg-deps.pl
+ create mode 100644 xorg-scripts/xorg-scripts.txt
+ create mode 100755 xorg-scripts/xorg-symbols.pl
+ create mode 100755 xorg-scripts/xorg-trace.pl
+
+diff --git a/xorg-scripts/xorg-build.pl b/xorg-scripts/xorg-build.pl
+new file mode 100755
+index 0000000..7c4c8ba
+--- /dev/null
++++ b/xorg-scripts/xorg-build.pl
+@@ -0,0 +1,2713 @@
++#!/usr/bin/perl
++
++##############################################################################
++#  Copyright (C) 2007, 2008 Paulo Cesar Pereira de Andrade.  All Rights Reserved.
++#
++#  This is free software; you can redistribute it and/or modify
++#  it under the terms of the GNU General Public License as published by
++#  the Free Software Foundation; either version 2 of the License, or
++#  (at your option) any later version.
++#
++#  This software is distributed in the hope that it will be useful,
++#  but WITHOUT ANY WARRANTY; without even the implied warranty of
++#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#  GNU General Public License for more details.
++#
++#  Authors:
++#	Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
++##############################################################################
++
++use Cwd;
++use File::Basename;
++use Getopt::Std;
++
++use strict;
++
++
++##############################################################################
++# Check command line options
++my %options;
++my $command = "";
++
++# File name to know finished a build with no erros
++my $build_ok = "xorg-build.ok";
++
++
++##############################################################################
++# This hash table is used to allow creating aliases to commads
++my %commands =
++(
++ "up"		=> "update",
++ "update"	=> "update",
++ "co"		=> "checkout",
++ "checkout"	=> "checkout",
++ "build"	=> "build",
++ "clean"	=> "clean",
++ "realclean"	=> "realclean",
++ "distclean"	=> "distclean",
++ "checktars"	=> "checktars",
++ "checktarballs"=> "checktars",
++ );
++
++
++##############################################################################
++# Check -<letter> options and script command
++Getopt::Std::getopts("n:cdgvh?", \%options);
++foreach (@ARGV) {
++    if ($commands{$_}) {
++	# XXX Use other method...
++	# Cause an error if more than one command specified...
++	$command .= $commands{$_};
++    }
++    else {
++	print(STDERR "* Unknown command $_\n");
++    }
++}
++if (not $commands{$command} or $options{'h'} or $options{'?'}) {
++    print(STDERR "Usage:\n",
++	  File::Basename::basename($0), " [options ...] command\n",
++	  "Options:\n",
++	  " -c      Start over update instead of from last failed repository.\n",
++	  " -d      Makes a debug build.\n",
++	  " -g      Generate dependency files (uses strace).\n",
++	  " -v      Verbose mode.\n",
++	  " -n name Process only modules with given name.\n",
++	  " -h, -?  Prints this message and quits.\n",
++	  "Commands:\n",
++	  " update         Updates source checkouts.\n",
++	  " checkout       Create build directory.\n",
++	  " build          Rebuild module.\n",
++	  " clean          Only remove $build_ok file.\n",
++	  " realclean      Runs \"make clean realclean\".\n",
++	  " distclean      Runs \"make clean distclean\".\n",
++	  " checktarballs  Checks if package tarball is available upstream.\n",
++	  "\n");
++    exit(0);
++}
++
++# For the moment, check it only once. Required for some fallback default
++# value options.
++die ("\$ENV{HOME} not set. Cannot continue.") unless ($ENV{HOME} ne "");
++
++# Maybe -W options could be handled differently, but a debug build most
++# certainly wants at least these...
++$ENV{CFLAGS} = "-O0 -g3 -Wall -Wpointer-arith -Wstrict-prototypes " .
++"-Wmissing-prototypes -Wmissing-declarations " .
++"-Wnested-externs -fno-strict-aliasing" if ($options{'d'});
++
++# For error messages
++$ENV{LC_ALL} = "C";
++
++
++##############################################################################
++# User configuration
++sub git_config {
++    my ($option) = @_;
++
++    $option = `git-config --global --get $option`;
++    $option =~ s/^\s+//;
++    $option =~ s/\s+$//;
++
++    return $option;
++};
++
++my $xorg_git_protocol = git_config("xorg-git.protocol");
++$xorg_git_protocol = "git"
++    unless ($xorg_git_protocol ne "");
++
++my $xorg_git_repository = git_config("xorg-git.repository");
++$xorg_git_repository = "anongit.freedesktop.org/git"
++    unless ($xorg_git_repository ne "");
++
++my $git_user_name = git_config("user.name");
++die("* Please run:\n",
++    "\tgit-config --global user.name \"Your user name\"\n",
++    "before proceeding.")
++    unless ($git_user_name ne "");
++
++my $git_user_email = git_config("user.email");
++die("* Please run:\n",
++    "\tgit-config --global user.email you\@yourdomain.example.com\n",
++    "before proceeding.")
++    unless ($git_user_email ne "");
++
++# Example: lib or lib64
++my $xorg_git_lib_name = git_config("xorg-git.lib-name");
++if ($xorg_git_lib_name eq "") {
++    if ($options{'v'}) {
++	print(STDERR "* Please consider running:\n",
++	      "\tgit-config --global xorg-git.lib-name name-of-library-path\n");
++    }
++    # Try to guess proper default
++    $xorg_git_lib_name = `uname -m`;
++    $xorg_git_lib_name = $xorg_git_lib_name =~ m/64/ ? "lib64" : "lib";
++}
++
++# Example: sudo or empty string
++my $xorg_git_sudo_command = git_config("xorg-git.sudo-command");
++if ($xorg_git_sudo_command eq "") {
++    if ($options{'v'}) {
++	print(STDERR "* Please consider running:\n",
++	      "\tgit-config --global xorg-git.sudo-command \"name-of-sudo-command-or-empty-string\"\n");
++    }
++    # Default to empty string, this should also help in catching attempting
++    # to install files outside destdir
++    $xorg_git_sudo_command = "";
++}
++
++# Example: /home/paulo/anongit.freedesktop.org
++my $xorg_git_checkout_dir = git_config("xorg-git.checkout-dir");
++if ($xorg_git_checkout_dir eq "") {
++    if ($options{'v'}) {
++	print(STDERR "* Please consider running:\n",
++	      "\tgit-config --global xorg-git.checkout-dir /path/to/git/checkout/dir\n");
++    }
++    $xorg_git_checkout_dir = "$ENV{HOME}/anongit.freedesktop.org";
++}
++
++# Example: /home/paulo/anongit.freedesktop.org/build
++my $xorg_git_build_dir = git_config("xorg-git.build-dir");
++if ($xorg_git_build_dir eq "") {
++    if ($options{'v'}) {
++	print(STDERR "* Please consider running:\n",
++	      "\tgit-config --global xorg-git.build-dir /path/to/build/dir\n");
++    }
++    $xorg_git_build_dir = "$ENV{HOME}/anongit.freedesktop.org/build";
++}
++
++# Example: /usr/local/xorg
++my $xorg_git_dest_dir = git_config("xorg-git.dest-dir");
++if ($xorg_git_dest_dir eq "") {
++    if ($options{'v'}) {
++	print(STDERR "* Please consider running:\n",
++	      "\tgit-config --global xorg-git.dest-dir /path/to/install/binaries\n");
++    }
++    $xorg_git_dest_dir = "/usr/local/xorg";
++}
++
++# Example: /usr/local/xorg/deps
++my $xorg_git_deps_dir = git_config("xorg-git.deps-dir");
++if ($xorg_git_deps_dir eq "") {
++    if ($options{'v'}) {
++	print(STDERR "* Please consider running:\n",
++	      "\tgit-config --global xorg-git.deps-dir /path/to/install/dependencies\n");
++    }
++    $xorg_git_deps_dir = "/usr/local/xorg/deps";
++}
++
++if ($options{'v'}) {
++    print(STDERR "Using options:\n",
++	  "  xorg-git.protocol     = $xorg_git_protocol\n",
++	  "  xorg-git.repository   = $xorg_git_repository\n",
++	  "  git_user_name         = $git_user_name\n",
++	  "  git_user_email        = $git_user_email\n",
++	  "  xorg-git.checkout-dir = $xorg_git_checkout_dir\n",
++	  "  xorg-git.build-dir    = $xorg_git_build_dir\n",
++	  "  xorg-git.dest-dir     = $xorg_git_dest_dir\n",
++	  "  xorg-git.deps-dir     = $xorg_git_deps_dir\n",
++	  "  xorg-git.lib-name     = $xorg_git_lib_name\n",
++	  "  xorg-git.sudo-command = $xorg_git_sudo_command\n",
++	  "\n");
++}
++
++# Need these to exist
++die("$xorg_git_checkout_dir does not exist.")
++    unless (-d $xorg_git_checkout_dir);
++die("$xorg_git_build_dir does not exist.")
++    unless (-d $xorg_git_build_dir);
++die("$xorg_git_dest_dir does not exist.")
++    unless (-d $xorg_git_dest_dir);
++die("$xorg_git_deps_dir does not exist.")
++    unless (-d $xorg_git_deps_dir);
++
++my $xorg_trace_pl = `which xorg-trace.pl`;
++chomp($xorg_trace_pl);
++if ($options{'g'}) {
++    $xorg_trace_pl = "./xorg-trace.pl" unless (-f $xorg_trace_pl);
++    die ("$xorg_trace_pl: ($!)") unless (-f $xorg_trace_pl);
++    $xorg_trace_pl = "/usr/bin/perl $xorg_trace_pl";
++}
++
++my $auto_cache_file = "$xorg_git_dest_dir/.cache";
++my $git_last_update = "$xorg_git_checkout_dir/xorg-update.tmp";
++
++$ENV{PKG_CONFIG_PATH} = "$xorg_git_dest_dir/$xorg_git_lib_name/pkgconfig:$ENV{PKG_CONFIG_PATH}";
++$ENV{LD_LIBRARY_PATH} = "$xorg_git_dest_dir/$xorg_git_lib_name:$ENV{LD_LIBRARY_PATH}";
++$ENV{ACLOCAL_LOCALDIR} = "$xorg_git_dest_dir/share/aclocal";
++$ENV{ACLOCAL} = "aclocal -I $ENV{ACLOCAL_LOCALDIR}";
++
++# Don't fail so early on first run :-)
++if (not -d $ENV{ACLOCAL_LOCALDIR}) {
++    x_system("$xorg_git_sudo_command mkdir -p $ENV{ACLOCAL_LOCALDIR}");
++}
++
++$ENV{PATH} = "$xorg_git_dest_dir/bin:$ENV{PATH}";
++
++
++##############################################################################
++# List of modules. Note that it is stored as a list also to allow proper
++# specification of order of packages that must be updated first.
++# Fields are:
++#	name		-> Name of module (also directory to append to path)
++#	path		-> Pathname in git repository
++#	configure	-> Extra configure/autogen.sh parameters
++#	version		-> Module version
++#	commit		-> If defined, build this commit/tag/branch
++#			   use with care...
++#	tarball		-> URL for tarball of module. This usually
++#			   is the official tarball of the module
++#	skip		-> Don't attempt to build this module
++
++#xedit
++my $ac_noxprint	  = "--disable-xprint";
++
++# libX11
++my $ac_xcb	  = "--with-xcb=yes";
++
++# xserver
++my $ac_buildaddr  = "--with-builder-addr=$git_user_email";
++my $ac_mesapath	  = "--with-mesa-source=$xorg_git_build_dir/mesa/mesa";
++my $ac_dga	  = "--enable-dga";
++my $ac_dmx	  = "--enable-dmx";
++my $ac_fontcache  = "--enable-fontcache";
++my $ac_glx	  = "--enable-glx";
++my $ac_glxtls	  = "--enable-glx-tls";
++my $ac_kdrive	  = "--enable-kdrive";
++my $ac_kvesa	  = "--enable-kdrive-vesa";
++my $ac_xace	  = "--enable-xace";
++my $ac_xdmcp	  = "--enable-xdmcp";
++my $ac_xdmauth	  = "--enable-xdm-auth-1";
++my $ac_xephyr	  = "--enable-xephyr";
++my $ac_xegl	  = "--enable-xegl";
++my $ac_xf86misc	  = "--enable-xf86misc";
++my $ac_xf86vid	  = "--enable-xf86vidmode";
++my $ac_xfake	  = "--disable-xfake";
++my $ac_xfbdev	  = "--enable-xfbdev";
++my $ac_xgl	  = "--disable-xgl";
++my $ac_xglx	  = "--enable-xglx";
++my $ac_xorg	  = "--enable-xorg";
++my $ac_xorgcfg	  = "--enable-xorgcfg";
++my $ac_xsdl	  = "--enable-xsdl";
++my $ac_xselinux	  = "--disable-xselinux";
++my $ac_xvfb	  = "--enable-xvfb";
++
++# mesa
++my $ac_mesadriver = "--with-driver=dri";
++my $ac_mesadridir = "--with-dri-driverdir=$xorg_git_dest_dir/$xorg_git_lib_name/dri";
++
++# mesa
++my $ac_xincludes  = "--x-includes=$xorg_git_dest_dir/include/X11";
++my $ac_xlibraries = "--x-libraries=$xorg_git_dest_dir/$xorg_git_lib_name";
++
++# xserver, mesa
++my $ac_debug	  = "--enable-debug";
++
++# xphelloworld
++my $ac_motiflibs  = "--with-motif-libraries=no";
++
++# xkeyboard-config
++my $ac_xkbcomplnk = "--disable-xkbcomp-symlink";
++my $ac_xkbrules   = "--enable-compat-rules";
++my $ac_xkbruleslnk= "--with-xkb-rules-symlink=xorg";
++
++# For tarballs
++my $tgz		= ".tar.bz2";
++my $xorg_app	= "app";
++my $xorg_doc	= "doc";
++my $xorg_driver	= "driver";
++my $xorg_font	= "font";
++my $xorg_lib	= "lib";
++my $xorg_proto	= "proto";
++my $xorg_url	= "http://xorg.freedesktop.org/releases/individual";
++my $xorg_util	= "util";
++
++
++my @modules =
++(
++ {
++     'name'	=> "modular",
++     'path'	=> "xorg/util",
++     'version'	=> "0.0.1",
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "x11proto",
++     'path'	=>"xorg/proto",
++     'version'	=> "7.0.12",
++     'tarball'	=> "$xorg_url/$xorg_proto/xproto-%{version}$tgz",
++ },
++ {
++     'name'	=> "libxtrans",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/xtrans-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXau",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXdmcp",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "proto",
++     'path'	=> "xcb",
++     'version'	=> "1.1",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "libICE",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "inputproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.4.3",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "kbproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.3",
++     'tag'	=> "%{name}-%{version}",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86bigfontproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.1.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libxcb",
++     'path'	=> "xcb",
++     'version'	=> "1.1",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "xextproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "7.0.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libSM",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libX11",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.1.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++     'configure'=> "$ac_xcb",
++ },
++ {
++     'name'	=> "libXt",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.5",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXext",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "printproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXmu",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXpm",
++     'path'	=> "xorg/lib",
++     'version'	=> "3.5.7",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXp",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXaw",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.4",
++     'tag'	=> "%{name}-%{version}",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "util",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "fixesproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "4.0",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "renderproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "0.9.3",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXfixes",
++     'path'	=> "xorg/lib",
++     'version'	=> "4.0.3",
++     'tag'	=> "%{name}-%{version}",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "damageproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.1.0",
++     'tag'	=> "%{name}-%{version}",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86vidmodeproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "2.2.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "compositeproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "0.4",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXrender",
++     'path'	=> "xorg/lib",
++     'version'	=> "0.9.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xineramaproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.1.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "randrproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.2.1",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "glproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.4.9",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXdamage",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "drm",
++     'path'	=> "mesa",
++     'version'	=> "2.3.0",
++     'tag'	=> "%{name}-%{version}",
++     'tarball'	=> "http://dri.freedesktop.org/libdrm/libdrm-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXxf86vm",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXi",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.1.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libxkbfile",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "videoproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "2.2.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "fontcacheproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "0.1.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "fontsproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "2.0.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libfontenc",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXcomposite",
++     'path'	=> "xorg/lib",
++     'version'	=> "0.4.0",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXcursor",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.1.9",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXinerama",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXrandr",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.2.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86miscproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "0.9.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "mesa",
++     'path'	=> "mesa",
++     'version'	=> "7.0.2",
++     # Fixme tarball
++     'configure'=>
++     "$ac_mesadriver "	.
++     "$ac_mesadridir "	.
++     "$ac_xincludes "		.
++     "$ac_xlibraries "	.
++     ($options {'d'} ? "$ac_debug" : ""),
++ },
++ {
++     'name'	=> "xf86driproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "2.0.3",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libxkbui",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "resourceproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "evieproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/evieext-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXv",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bigreqsproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "dmxproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "2.2.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "recordproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.13.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "scrnsaverproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xcmiscproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.1.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86dgaproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "2.0.3",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "trapproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "3.4.3",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXfont",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.3.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libpciaccess",
++     'path'	=> "xorg/lib",
++     'version'	=> "0.10",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "pixman",
++     'path'	=> "",	# empty path
++     'version'	=> "0.9.6",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXxf86misc",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "macros",
++     'path'	=> "xorg/util",
++     'version'	=> "1.1.6",
++     'tarball'	=> "$xorg_url/$xorg_util/util-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xserver",
++     'path'	=> "xorg",
++     'version'	=> "1.4.99.901",
++     'tarball'	=> "$xorg_url/xserver/xorg-server-%{version}$tgz",
++     'configure'=>
++     "$ac_buildaddr "	.
++     "$ac_mesapath "	.
++     "$ac_dga "		.
++     "$ac_dmx "		.
++     "$ac_fontcache "	.
++     "$ac_glx "		.
++     "$ac_glxtls "	.
++     "$ac_kdrive "	.
++     "$ac_kvesa "	.
++     "$ac_xace "	.
++     "$ac_xdmcp "	.
++     "$ac_xdmauth "	.
++     "$ac_xephyr "	.
++     "$ac_xegl "	.
++     "$ac_xf86misc "	.
++     "$ac_xf86vid "	.
++     "$ac_xfake "	.
++     "$ac_xfbdev "	.
++     "$ac_xgl "		.
++     "$ac_xglx "	.
++     "$ac_xorg "	.
++     "$ac_xorgcfg "	.
++     "$ac_xsdl "	.
++     "$ac_xselinux "	.
++     "$ac_xvfb "	.
++     ($options{'d'} ? "$ac_debug" : ""),
++ },
++ {
++     'name'	=> "pthread-stubs",
++     'path'	=> "xcb",
++     'version'	=> "0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/libpthread-stubs-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXprintUtil",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "fontconfig",
++     'path'	=> "",	# empty path
++     'version'	=> "2.5.0",
++     'tarball'	=> "http://fontconfig.org/release/fontconfig-%{version}.tar.gz",
++ },
++ {
++     'name'	=> "windowswmproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "applewmproto",
++     'path'	=> "xorg/proto",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "mkfontscale",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bdftopcf",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXvMC",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xcursorgen",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXTrap",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bitmaps",
++     'path'	=> "xorg/data",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/data/xbitmaps-1.0.1$tgz",
++ },
++ {
++     'name'	=> "libXfontcache",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "pmproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/xproxymanagementprotocol-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXRes",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/libXres-%{version}$tgz", # lowercase r
++ },
++ {
++     'name'	=> "libXprintAppUtil",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXft",
++     'path'	=> "xorg/lib",
++     'version'	=> "2.1.12",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libFS",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXxf86dga",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXtst",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libdmx",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'path'	=> "xorg/lib",
++     'name'	=> "liblbxutil",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXScrnSaver",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.1.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "lndir",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.1",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "imake",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.2",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "gccmakedep",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.2",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "cf",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.2",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "xf86rushproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "1.1.2",
++     'tarball'	=> "$xorg_url/$xorg_proto/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "liboldX",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libXevie",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libWindowsWM",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "libAppleWM",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_lib/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xfree86-type1",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "winitzki-cyrillic",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "sony-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "screen-cyrillic",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "schumacher-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "misc-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "misc-meltho",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "misc-ethiopic",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "misc-cyrillic",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "micro-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "jis-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "isas-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "ibm-type1",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "encodings",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_font/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "dec-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "daewoo-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "cursor-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "cronyx-cyrillic",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bitstream-type1",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bitstream-speedo",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bitstream-75dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bitstream-100dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bh-type1",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bh-ttf",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bh-lucidatypewriter-75dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bh-lucidatypewriter-100dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bh-75dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "bh-100dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "arabic-misc",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "alias",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "adobe-utopia-75dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "adobe-utopia-100dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "adobe-75dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "adobe-100dpi",
++     'path'	=> "xorg/font",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_font/font-%{name}-%{version}$tgz",
++ },
++ {
++     ### FIXME need to find official tarball url, if any
++     'name'	=> "xf86-video-xgixp",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.7.99.2",
++ },
++ {
++     'name'	=> "xf86-video-xgi",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.5.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-wsfb",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.2.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "*BSD only - wsfb_driver.c:46:33: error: dev/wscons/wsconsio.h: No such file or directory",
++ },
++ {
++     'name'	=> "xf86-video-voodoo",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-vmware",
++     'path'	=> "xorg/driver",
++     'version'	=> "10.15.2",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-via",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.2.2",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "not building - drm/drm.h int64_t not defined - needs pciaccess conversion after not including drm/drm.h",
++ },
++ {
++     'name'	=> "xf86-video-vga",
++     'path'	=> "xorg/driver",
++     'version'	=> "4.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-vesa",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.3.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-v4l",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-tseng",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-trident",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.2.4",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-tga",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-tdfx",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.3.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-suntcx",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-sunleo",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-sunffb",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-suncg6",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-suncg3",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-suncg14",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-sunbw2",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-sisusb",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.8.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-sis",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.9.4",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-siliconmotion",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.5.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-savage",
++     'path'	=> "xorg/driver",
++     'version'	=> "2.1.3",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-s3virge",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.9.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-s3",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.5.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-rendition",
++     'path'	=> "xorg/driver",
++     'version'	=> "4.1.3",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-radeonhd",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-r128",
++     'path'	=> "xorg/driver",
++     'version'	=> "6.8.0",
++     # not available
++     #'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-nv",
++     'path'	=> "xorg/driver",
++     'version'	=> "2.1.8",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-nsc",
++     'path'	=> "xorg/driver",
++     'version'	=> "2.8.3",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-newport",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.2.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-neomagic",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-mga",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.4.8",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-mach64",
++     'path'	=> "xorg/driver",
++     'version'	=> "6.8.0",
++     # not yet available
++     #'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-intel",
++     'path'	=> "xorg/driver",
++     'version'	=> "2.2.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-imstt",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "not building - imstt.h:13: error: expected specifier-qualifier-list before 'pciVideoPtr'",
++ },
++ {
++     'name'	=> "xf86-video-impact",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.2.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "Not ix86: impact_shadow.c:17:26: error: asm/cachectl.h: No such file or directory",
++ },
++ {
++     'name'	=> "xf86-video-i810",
++     #'path'	=> "xorg/driver",
++     'version'	=> "1.7.4",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "replaced by intel driver",
++ },
++ {
++     'name'	=> "xf86-video-i740",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-i128",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.2.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "not building - i128accel.c:38:24: error: xf86_ansic.h: No such file or directory /// i128.h:37: error: expected specifier-qualifier-list before 'pciVideoPtr'",
++ },
++ {
++     'name'	=> "xf86-video-glint",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-glide",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "Needs libglide & co",
++ },
++ {
++     'name'	=> "xf86-video-fbdev",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.3.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-dummy",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.2.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-cyrix",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "not building - cyrix.h:113: error: expected specifier-qualifier-list before 'pciVideoPtr'",
++ },
++ {
++     'name'	=> "xf86-video-cirrus",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-chips",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-ati",
++     'path'	=> "xorg/driver",
++     'version'	=> "6.8.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-ast",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.81.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-ark",
++     'path'	=> "xorg/driver",
++     'version'	=> "0.6.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-apm",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-video-amd",
++     'path'	=> "xorg/driver",
++     'version'	=> "2.7.7.6",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++     'skip'	=> "amd_gx_driver.c:331: error: 'pciVideoRec' undeclared (first use in this function)",
++ },
++ {
++     'name'	=> "xf86-input-void",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-vmmouse",
++     'path'	=> "xorg/driver",
++     'version'	=> "12.4.3",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-ur98",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-tek4957",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-summa",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-spaceorb",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-penmount",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.2.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-palmax",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-mutouch",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-mouse",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.2.3",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-microtouch",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-magictouch",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.0.0.5",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-magellan",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-keyboard",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.2.2",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-joystick",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.3.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-jamstudio",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-hyperpen",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-fpit",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-evdev",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.2.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-elographics",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-elo2300",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-dynapro",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-dmc",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-digitaledge",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.0",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-citron",
++     'path'	=> "xorg/driver",
++     'version'	=> "2.2.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-calcomp",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-aiptek",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.1.1",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86-input-acecad",
++     'path'	=> "xorg/driver",
++     'version'	=> "1.2.2",
++     'tarball'	=> "$xorg_url/$xorg_driver/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xorg-sgml-doctools",
++     'path'	=> "xorg/doc",
++     'version'	=> "1.2",
++     'tarball'	=> "$xorg_url/$xorg_doc/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xorg-docs",
++     'path'	=> "xorg/doc",
++     'version'	=> "1.4",
++     'tarball'	=> "$xorg_url/$xorg_doc/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "cursors",
++     'path'	=> "xorg/data",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/data/xcursor-themes-1.0.1$tgz",
++ },
++ {
++     'name'	=> "xwud",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xwininfo",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xwd",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xvinfo",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xvidtune",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xtrap",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xstdcmap",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xsm",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xsetroot",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xsetpointer",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xsetmode",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.0",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xset",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xrx",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xrestop",
++     'path'	=> "xorg/app",
++     'version'	=> "0.4",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "xrefresh",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xrdb",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.5",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xrandr",
++     'path'	=> "xorg/app",
++     'version'	=> "1.2.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xprop",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xprehashprinterlist",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xpr",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xplsprinters",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xphelloworld",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'configure'=> "$ac_motiflibs",
++ },
++ {
++     'name'	=> "xmore",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xmodmap",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xmh",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xmessage",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xman",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xmag",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xlsfonts",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xlsclients",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xlsatoms",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xlogo",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xload",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xkill",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xkbutils",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xkbprint",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xkbevd",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xkbcomp",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xinput",
++     'path'	=> "xorg/app",
++     'version'	=> "1.3.0",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xinit",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.8",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xhost",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xgc",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xgamma",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xfwp",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xfsinfo",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xfs",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.6",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xfontsel",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xfindproxy",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xfd",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xf86dga",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xeyes",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xev",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xedit",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'configure'=> "$ac_noxprint",
++ },
++ {
++     'name'	=> "xdriinfo",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xdpyinfo",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xdm",
++     'path'	=> "xorg/app",
++     'version'	=> "1.1.7",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xditview",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xdbedizzy",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xconsole",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xcompmgr",
++     'path'	=> "xorg/app",
++     'version'	=> "1.1.4",
++     'tarball'	=> "http://xapps.freedesktop.org/release/%{name}-%{version}.tar.gz",
++ },
++ {
++     'name'	=> "xcmsdb",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xclock",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xclipboard",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xcalc",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xbiff",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xbacklight",
++     'path'	=> "xorg/app",
++     'version'	=> "1.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xauth",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "x11perf",
++     'path'	=> "xorg/app",
++     'version'	=> "1.5",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "viewres",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "twm",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "smproxy",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "showfont",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "setxkbmap",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "sessreg",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "scripts",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "rstart",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "rgb",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "rendercheck",
++     'path'	=> "xorg/app",
++     'version'	=> "1.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "proxymngr",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "oclock",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "mkfontdir",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.4",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "mkcomposecache",
++     'path'	=> "xorg/app",
++     'version'	=> "1.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "luit",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "listres",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "lbxproxy",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "intel-gen4asm",
++     'path'	=> "xorg/app",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "ico",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "iceauth",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "grandr",
++     'path'	=> "xorg/app",
++     'version'	=> "0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "glxcompmgr",
++     'path'	=> "xorg/app",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "fstobdf",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "fslsfonts",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "fonttosfnt",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "fdclock",
++     'path'	=> "xorg/app",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "editres",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "constype",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "compiz",
++     'path'	=> "xorg/app",
++     'version'	=> "0.7.2",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}.tar.gz",
++ },
++ {
++     'name'	=> "bitmap",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "beforelight",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.3",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "appres",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++ },
++ {
++     'name'	=> "xkeyboard-config",
++     'path'	=> "",
++     'version'	=> "1.1",
++     # Fixme tarball
++     # 'commit'	=> "-r v_1_1 xkeyboard-config",
++     'configure'=> "$ac_xkbcomplnk $ac_xkbrules $ac_xkbruleslnk",
++ },
++ {
++     'name'	=> "util",
++     'path'	=> "xcb",
++     'version'	=> "0.2",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "demo",
++     'path'	=> "xcb",
++     'version'	=> "0.1",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "xf86-video-nouveau",
++     'path'	=> "nouveau",
++     'version'	=> "1.2.0",
++     # Fixme tarball
++ },
++ {
++     'name'	=> "xf86-video-avivo",
++     'path'	=> "avivo",
++     'version'	=> "0.0.1",
++     # Fixme tarball
++ },
++
++
++ {
++     'name'	=> "calibrateproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "0.1.0",
++     # no tarball at $xorg_url/$xorg_proto/
++     'skip'	=> "ignore",
++ },
++ {
++     'name'	=> "lg3dproto",
++     'path'	=>"xorg/proto",
++     'version'	=> "5.0",
++     # no tarball available at $xorg_url/$xorg_proto/
++     'skip'	=> "ignore",
++ },
++ {
++     'name'	=> "libXamine",
++     'path'	=> "xcb",
++     'version'	=> "0.1",
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "libXCalibrate",
++     'path'	=> "xorg/lib",
++     'version'	=> "0.4.0",
++     # No tarball at $xorg_url/$xorg_lib/
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "libXlg3d",
++     'path'	=> "xorg/lib",
++     'version'	=> "1.0.0",
++     # No tarball at $xorg_url/$xorg_lib/
++     'skip'	=> "yes",
++ },
++ # libxxf86rush unbuildable?
++ #   tarball not available lib at $xorg_url/$xorg_lib/
++ {
++     'name'	=> "mkcfm",
++     'path'	=> "xorg/app",
++     'version'	=> "1.0.1",
++     'tarball'	=> "$xorg_url/$xorg_app/%{name}-%{version}$tgz",
++     'skip'	=> "broken missing symbols CIDOpenScalable, CIDRegisterFontFileFunctions (should be in libXfont ?)",
++ },
++
++ # x11-driver-input-sample unbuildable? or can be added?
++
++ {
++     'name'	=> "edid-decode",
++     'path'	=> "xorg/app",
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "makepsres",
++     'path'	=> "xorg/app",
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "pclcomp",
++     'path'	=> "xorg/app",
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "xshowdamage",
++     'path'	=> "xorg/app",
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "install-check",
++     'path'	=> "xorg/util",
++     # No version
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "makedepend",
++     'path'	=> "xorg/util",
++     'version'	=> "1.0.2",
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ {
++     'name'	=> "xmkmf",
++     'path'	=> "xorg/util",
++     # No files
++     # Fixme tarball
++     'skip'	=> "yes",
++ },
++ );
++
++
++##############################################################################
++# Simple wrapper that prints errno string if not successful
++sub x_system {
++    my ($command, $die) = @_;
++
++    print(STDERR "    $command\n");
++    system($command);
++    if ($?) {
++	die(" ** Error code $? ($!)\n")
++	    if ($die);
++    }
++};
++
++
++##############################################################################
++# Simple wrapper that prints errno string if not successful
++sub x_chdir {
++    my ($dir) = @_;
++
++    print(STDERR "    cd $dir\n");
++    chdir($dir) or die(" ** $!\n");
++};
++
++
++##############################################################################
++# Does a clone/pull in the build dir to avoid poluting the main repository
++# and giving a chance for better review of changes.
++sub checkout {
++    my ($package) = \%{$_};
++
++    my ($path, $name, $commit) =
++	($package->{'path'},
++	 $package->{'name'},
++	 $package->{'commit'});
++
++    my $command;
++    my $prefix = ($path ne "" ? "$path/" : "") . $name;
++
++    x_chdir($xorg_git_build_dir);
++    if (-d $prefix) {
++	x_chdir($prefix);
++
++	# Special case
++	if ($name eq "xkeyboard-config") {
++	    $command = "cvs up";
++	}
++	else {
++	    $command = "git-pull";
++	}
++
++	# Follow pattern of other commands
++	print(STDERR "    $command\n");
++	my $result = `$command`;
++
++	# Very basic way to know this directory needs to be recompiled
++	if ($result !~ /Already up-to-date./) {
++	    x_system("rm -f $build_ok");
++	}
++    }
++    else {
++	# Special case
++	if ($name eq "xkeyboard-config") {
++	    x_system("cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name login");
++	    x_system("cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name co $commit $name");
++	}
++	else {
++	    x_system("git-clone file://$xorg_git_checkout_dir/$prefix $prefix");
++	    if ($commit ne "") {
++		x_chdir($prefix);
++		x_system("git-checkout $commit");
++	    }
++	}
++    }
++};
++
++
++##############################################################################
++# Updates git repository
++sub update {
++    my ($package) = \%{$_};
++
++    my ($path, $name) =
++	($package->{'path'},
++	 $package->{'name'});
++
++    x_system("echo -n $path/$name > $git_last_update");
++
++    my $command;
++    my $prefix = ($path ne "" ? "$path/" : "") . $name;
++
++    x_chdir($xorg_git_checkout_dir);
++    if (-d $prefix) {
++	x_chdir($prefix);
++
++	# Special case
++	if ($name eq "xkeyboard-config") {
++	    $command = "cvs up";
++	}
++	else {
++	    if (`git diff`) {
++		die("$name has uncommited changes.\n");
++	    }
++	    my $tmp = $/;
++	    $/ = undef;
++	    $command = `git branch`;
++	    $/ = $tmp;
++	    # Don't try to switch branches, as it may cause conflicting merges.
++	    # Require that the package leave it in master branch, i.e. just
++	    # in a state matching a standard/default readonly checkout.
++	    if ($command !~ /^\* master$/m) {
++		die("$path/$name is not in branch master.\n");
++	    }
++	    $command = "git-pull";
++	}
++    }
++    else {
++	# Special case
++	if ($name eq "xkeyboard-config") {
++	    x_system("cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name login");
++	    $command = "cvs -d:pserver:anoncvs\@cvs.freedesktop.org:/cvs/$name co $package->{commit} $name";
++	}
++	else {
++	    $command = "git clone $xorg_git_protocol://$xorg_git_repository/$prefix $prefix";
++	}
++    }
++    x_system("$command");
++};
++
++
++##############################################################################
++sub checktars {
++    my ($package) = \%{$_};
++
++    my ($path, $name, $tarball) =
++	($package->{'path'},
++	 $package->{'name'},
++	 $package->{'tarball'});
++
++    if ($tarball) {
++    #	my $filename = File::Basename::basename($tarball);
++    #
++    #	if (not -f "$xorg_git_build_dir/$path/$name/$filename") {
++    #	    x_chdir("$xorg_git_build_dir/$path/$name");
++    #	    x_system("wget -q $tarball");
++    #	    print(STDERR " ** Missing package downloaded from upstream.\n")
++    #		unless ($?);
++    #	}
++    #	else {
++	    x_system("wget --spider -q $tarball");
++	#	}
++	if ($?) {
++	    print(STDERR " ** Error checking tarball $tarball.\n");
++	}
++    }
++    else {
++	print(STDERR " ** No tarball specified for package $name\n");
++    }
++};
++
++
++##############################################################################
++sub build {
++    my ($package) = \%{$_};
++
++    my ($path, $name, $configure) =
++	($package->{'path'},
++	 $package->{'name'},
++	 $package->{'configure'});
++
++    my $trace = $options{'g'} ? $xorg_trace_pl : "";
++    my $full_path = "$xorg_git_build_dir/$path/$name";
++
++    if (not -f "$full_path/$build_ok") {
++	x_chdir("$full_path");
++
++	my $arguments = " --prefix=$xorg_git_dest_dir --cache-file=$auto_cache_file $configure";
++
++	if (-f "Makefile") {
++	    x_system("make distclean");
++	}
++	if ($options{'g'}) {
++	    x_system("rm -f $name.deps $name.files");
++	}
++
++	if (-f "autogen.sh") {
++	    x_system("$trace ./autogen.sh $arguments");
++	}
++	# Mesa special case only?
++	else {
++	    x_system("$trace autoconf");
++	    x_system("$trace make configure");
++	    x_system("$trace ./configure $arguments");
++	}
++
++	x_system("$trace make", 1);
++
++	# XXX
++	$trace .= $options{'g'} ? " -i" : "";
++	x_system("$xorg_git_sudo_command $trace make install", 1);
++
++	if ($options{'g'}) {
++	    x_system("$xorg_git_sudo_command mkdir -p $xorg_git_deps_dir/$path");
++	    x_system("$xorg_git_sudo_command /bin/sh -c \"cat $name.deps | sort | uniq > $xorg_git_deps_dir/$path/$name.deps\"");
++	    x_system("$xorg_git_sudo_command /bin/sh -c \"cat $name.files | sort | uniq > $xorg_git_deps_dir/$path/$name.files\"");
++	}
++
++	x_system("touch $build_ok");
++    }
++};
++
++
++##############################################################################
++sub clean {
++    my ($package) = \%{$_};
++
++    my ($path, $name) =
++	($package->{'path'},
++	 $package->{'name'});
++
++    x_system("rm -f $xorg_git_build_dir/$path/$name/$build_ok");
++};
++
++
++##############################################################################
++sub realclean {
++    my ($package) = \%{$_};
++
++    my ($path, $name) =
++	($package->{'path'},
++	 $package->{'name'});
++
++    x_chdir("$xorg_git_build_dir/$path/$name");
++    x_system("rm -f $build_ok");
++    x_system("make realclean") if (-f "Makefile");
++};
++
++
++##############################################################################
++sub distclean {
++    my ($package) = \%{$_};
++
++    my ($path, $name) =
++	($package->{'path'},
++	 $package->{'name'});
++
++    x_chdir("$xorg_git_build_dir/$path/$name");
++    x_system("rm -f $build_ok");
++    x_system("make distclean") if (-f "Makefile");
++};
++
++
++##############################################################################
++# Replace hash values with macros in the format %{string} to $module->{'string'}
++#   Only one pass and no specific order
++sub replace_macros_and_check_errors {
++    my ($module, $key, $value, $macro, $replace);
++
++    foreach $module (@modules) {
++	while (($key, $value) = each %$module) {
++	    # Don't allow modules without a version specified
++	    #die("$module->{package} doesn't have a version")
++		#unless($module->{'version'} or $module->{'skip'});
++
++	    while ($value =~ /%\{(\w+)\}/) {
++		$macro = $1;
++		if ($module->{$macro}) {
++		    $replace = $module->{$1};
++		}
++		else {
++		    # Don't allow undefined ``macros''.
++		    # Assume name is always properly defined
++		    die(" ** unknown macro $module->{name}:%{$macro}.\n");
++		}
++		$value =~ s/%\{$1\}/$replace/g;
++	    }
++	    $module->{$key} = $value;
++	}
++    }
++}
++replace_macros_and_check_errors();
++
++
++##############################################################################
++# Subroutines are free to change this now as a lot of "system" commands
++# may be used.
++my $dir = Cwd::getcwd();
++
++my %table = (
++    "update"	=>	\&update,
++    "checkout"	=>	\&checkout,
++    "build"	=>	\&build,
++    "clean"	=>	\&clean,
++    "realclean"	=>	\&realclean,
++    "distclean"	=>	\&distclean,
++    "checktars"	=>	\&checktars,
++);
++
++#  Add skip for -n option
++if ($options{'n'}) {
++    foreach (@modules) {
++	$_->{'skip'} = "yes" unless ($_->{'name'} eq $options{'n'});
++    }
++}
++
++# If using a temp file to not need to restart over an update...
++if ($command eq "update" and not $options{'c'} and -f $git_last_update) {
++    my $lastupdate = `cat $git_last_update`;
++    foreach (@modules) {
++	last if ("$_->{path}/$_->{name}" eq $lastupdate);
++	$_->{'skip'} = "yes";
++    }
++}
++foreach (@modules) {
++    print(STDERR "--> $_->{name}\n");
++    my $function = $table{$command};
++    $function->($_) unless($_->{'skip'});
++}
++# If using a temp file to not need to restart over an update...
++if ($command eq "update" and -f $git_last_update) {
++    x_system("rm -f $git_last_update");
++}
++
++# Restore current directory
++chdir($dir);
+diff --git a/xorg-scripts/xorg-deps.pl b/xorg-scripts/xorg-deps.pl
+new file mode 100755
+index 0000000..6585bde
+--- /dev/null
++++ b/xorg-scripts/xorg-deps.pl
+@@ -0,0 +1,126 @@
++#!/usr/bin/perl
++
++##############################################################################
++#  Copyright (C) 2008 Paulo Cesar Pereira de Andrade.  All Rights Reserved.
++#
++#  This is free software; you can redistribute it and/or modify
++#  it under the terms of the GNU General Public License as published by
++#  the Free Software Foundation; either version 2 of the License, or
++#  (at your option) any later version.
++#
++#  This software is distributed in the hope that it will be useful,
++#  but WITHOUT ANY WARRANTY; without even the implied warranty of
++#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#  GNU General Public License for more details.
++#
++#  Authors:
++#	Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
++##############################################################################
++
++use Cwd;
++
++use strict;
++
++
++##############################################################################
++# From xorg-build.pl
++##############################################################################
++sub git_config {
++    my ($option) = @_;
++
++    $option = `git-config --global --get $option`;
++    $option =~ s/^\s+//;
++    $option =~ s/\s+$//;
++
++    return $option;
++};
++
++my $x_depsdir = git_config("xorg-git.deps-dir");
++$x_depsdir = "/usr/local/xorg/deps" unless ($x_depsdir);
++$x_depsdir = Cwd::realpath($x_depsdir);
++##############################################################################
++# End From xorg-build.pl
++##############################################################################
++
++
++##############################################################################
++my %database;
++sub load_database {
++    my ($name);
++
++    foreach $name (split('\n', `find $x_depsdir -type f -a -name \\*.files`)) {
++	$name = Cwd::realpath($name);
++	open(DATA, "<$name") or die("Cannot read $name ($!)");
++	$name =~ s/^$x_depsdir\///;
++	$name =~ s/\.files$//;
++	while (<DATA>) {
++	    chomp;
++	    if ($database{$_}) {
++		# Just in case two packages installed a file with the same name
++		print(STDERR " ** File $database{$_}:$_ also owned by $name\n");
++	    }
++	    $database{$_} = $name;
++	}
++	close(DATA);
++    }
++};
++
++# Do it
++load_database();
++
++
++##############################################################################
++my %dependencies;
++sub build_dependencies {
++    my ($name, $depend);
++
++    foreach $name (split('\n', `find $x_depsdir -type f -a -name \\*.deps`)) {
++	$name = Cwd::realpath($name);
++	open(DATA, "<$name") or die("Cannot read $name ($!)");
++	$name =~ s/^$x_depsdir\///;
++	$name =~ s/\.deps$//;
++
++	# Just in case it has no dependencies, so output will be made to tsort
++	push(@{$dependencies{$name}}, $name);
++
++	while ($depend = <DATA>) {
++	    chomp($depend);
++	    if ($database{$depend}) {
++		$depend = $database{$depend};
++		unless (grep($_ eq $depend, @{$dependencies{$name}})) {
++		    push(@{$dependencies{$name}}, $depend);
++		}
++	    }
++	    else {
++		# XXX This may have been caused by some rename, link/unlink,
++		# or the like during install. If it happens, xorg-trace.pl
++		# needs some extra handling.
++		print(STDERR " ** $name requires $depend not owned by any module\n");
++	    }
++	}
++	close(DATA);
++    }
++};
++
++# Do it
++build_dependencies();
++
++
++##############################################################################
++sub print_build_order {
++    my ($module, $depend);
++
++    # This works for the needs of this script, but some special
++    # handling on descriptors is required if not using a temp file
++    # and filtering of output is required.
++    open(TSORT, "| tsort | tac 2>&1") or die("tsort|tac: ($!).");
++    foreach $module (keys %dependencies) {
++	foreach $depend (@{$dependencies{$module}}) {
++	    print(TSORT "$module $depend\n");
++	}
++    }
++    close(TSORT);
++};
++
++# Do it again
++print_build_order();
+diff --git a/xorg-scripts/xorg-scripts.txt b/xorg-scripts/xorg-scripts.txt
+new file mode 100644
+index 0000000..376cea2
+--- /dev/null
++++ b/xorg-scripts/xorg-scripts.txt
+@@ -0,0 +1,93 @@
++  How to use the scripts:
++
++========================================================================
++xorg-build.pl:
++  First it is required to clone freedesktop modules.
++
++  Use "git-config --global xorg-git.protocol protocol"
++if the default git:// does not apply (doesn't need ://)
++
++  Use "git-config --global xorg-git.repository repository-url"
++if anongit.freedesktop.org/git does not apply.
++
++  Use "git-config --global xorg-git.checkout-dir some/directory"
++The default value is "$HOME/anongit.freedesktop.org".
++If you already have a clone, you may set to that value. The script
++doesn't modify any files, just update or checkout.
++
++  Now you can run:
++./xorg-build.pl -v up
++to clone or update the required modules.
++
++------------------------------------------------------------------------
++  Use "git-config --global xorg-git.build-dir /some/build/dir"
++to specify where to build the modules. The default value
++is "$HOME/anongit.freedesktop.org/build".
++
++  Now you can run:
++./xorg-build.pl -v co
++and it will clone from your "mirror", using a command like:
++git-clone file://freedesktop-mirror/path/name path/name
++from the build directory root.
++
++------------------------------------------------------------------------
++  Use "git-config --global xorg-git.dest-dir /some/dir"
++to specify where to install the build. The default value is
++"/usr/local/xorg".
++
++  Use "git-config --global xorg-git-deps-dir /some/dir/deps"
++to specify where to install dependency files. This directory
++must exist if using the -g option.
++
++  If you are installing in a directory that needs root permission,
++you may also need to run "git-config --global xorg-git.sudo-command sudo"
++
++  Also, the script xorg-trace.pl must be in your path. You can just
++create a $HOME/bin and copy it there. Also ensure that $HOME/bin
++is in your path.
++
++  Now you can run:
++./xorg-buil.pl -v -g -d build
++  -v     is verbose mode
++  -g     means it will use strace to generate dependency information
++  -d     means it will build with debug and with some verbose gcc options
++  build  is the script command
++
++  If if fails at some point, it probably is due to some missing external
++dependency that you may want to install. Alternatively, you can edit
++xorg-build.pl and add a 'skip' entry for the module that failed.
++
++
++========================================================================
++xorg-symbols.pl:
++  If everything gone well in the previous step, you can use the
++script xorg-symbols.pl to check for missing symbols, symbols clashes, etc.
++To use it, just run something like:
++
++./xorg-symbols.pl -x | less
++
++ -x is just to avoid too much verbose output when resolving a symbol
++in the Xorg binary.
++  You can also use it to check the packages of your favourite distro, by
++using something like:
++
++./xorg-symbols.pl -p /usr -m /usr/lib/xorg/modules:/usr/lib/fglrx/modules
++  -p is the prefix, that defaults to xorg-build.pl's destdir.
++  -m is the module path and ":" can be used to specify multiple paths.
++
++
++========================================================================
++xorg-deps.pl:
++  Finally, the script xorg-deps.pl just parses the dependency information
++generated by "xorg-build.pl -g" and prints the order packages must be
++built.
++  To use it, run:
++./xorg-deps.pl 2>&1 | less
++
++  Note that the order may not look logical, as tsort does topological
++sort, and there is not specific ordering of modules in the "same level".
++
++========================================================================
++xorg-trace.pl:
++  This script is run by xorg-build.pl, it may need some rework to be
++usable in other environments.
+diff --git a/xorg-scripts/xorg-symbols.pl b/xorg-scripts/xorg-symbols.pl
+new file mode 100755
+index 0000000..81dfc79
+--- /dev/null
++++ b/xorg-scripts/xorg-symbols.pl
+@@ -0,0 +1,516 @@
++#!/usr/bin/perl
++
++##############################################################################
++#  Copyright (C) 2007, 2008 Paulo Cesar Pereira de Andrade.  All Rights Reserved.
++#
++#  This is free software; you can redistribute it and/or modify
++#  it under the terms of the GNU General Public License as published by
++#  the Free Software Foundation; either version 2 of the License, or
++#  (at your option) any later version.
++#
++#  This software is distributed in the hope that it will be useful,
++#  but WITHOUT ANY WARRANTY; without even the implied warranty of
++#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#  GNU General Public License for more details.
++#
++#  Authors:
++#	Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
++##############################################################################
++
++use Cwd;
++use File::Basename;
++use Getopt::Std;
++
++use strict;
++
++my %servers;
++my %modules;
++my @objects;
++my %types;
++my %weaks;
++my %bases;
++my %undefs;
++my %hiddens;
++my %exports;
++my %clashes;
++my %loaders;
++my %dynamics;
++my %libraries;
++my %options;
++
++
++my @ignore = ("___tls_get_addr",
++
++	      "__div64",
++	      "__divdf3",
++	      "__divsf3",
++	      "__divsi3",
++	      "__modsi3",
++	      "__mul64",
++	      "__muldf3",
++	      "__mulsf3",
++	      "__mulsi3",
++	      "__udivsi3",
++	      "__umodsi3",
++
++	      "__gmon_start__",
++
++	      "__libc_enable_secure",
++	      "__libc_stack_end",
++
++	      "__pthread_key_create",
++	      "__pthread_once",
++	      "__pthread_getspecific",
++	      "__pthread_setspecific",
++
++	      "__resp",
++
++	      "_rtld_global",
++	      "_rtld_global_ro",
++
++	      "_IO_stdin_used",
++	      "_Jv_RegisterClasses",
++
++	      "_dl_allocate_tls",
++	      "_dl_allocate_tls_init",
++	      "_dl_argv",
++	      "_dl_deallocate_tls",
++	      "_dl_get_tls_static_info",
++	      "_dl_make_stack_executable",
++	      "_dl_rtld_di_serinfo",
++	      "_dl_starting_up",
++	      "_dl_tls_get_addr_soft",
++
++	      "_fini",
++	      "_init",
++
++	      "errno",
++	      "h_errno",
++
++	      "w__div64",
++	      "w__divdf3",
++	      "w__divsf3",
++	      "w__divsi3",
++	      "w__modsi3",
++	      "w__mul64",
++	      "w__muldf3",
++	      "w__mulsf3",
++	      "w__mulsi3",
++	      "w__udivsi3",
++	      "w__umodsi3",
++	      "w_IO_stdin_used",
++	      "w_Jv_RegisterClasses",
++	      "w_dl_starting_up",
++	      "w__gmon_start__",
++	      "w__pthread_getspecific",
++	      "w__pthread_key_create",
++
++	      "w__pthread_mutex_lock",
++	      "w__pthread_mutex_unlock",
++
++	      "w__pthread_once",
++	      "w__pthread_setspecific",
++	      "wpthread_cancel",
++	      "wpthread_once");
++
++Getopt::Std::getopts("p:m:aefxsh?", \%options);
++if ($options{'h'} or $options{'?'}) {
++    print("Usage:\n",
++	  File::Basename::basename($0), " [options ...]\n",
++	  " -a      Don't ignore symbols in \`\`\@ignore'' list.\n",
++	  " -p path Use path prefix instead of xorg-git.dest-dir\n",
++	  "         Try /usr for \"standard\" install files.\n",
++	  " -m path Use given module path\n",
++	  "         use \":\" to specify multiple module paths.\n",
++	  " -e      Don't warn about not referenced exported symbols.\n",
++	  " -f      Prints full paths of binaries.\n",
++	  " -x      Don't warn about symbols found in the X Server.\n",
++	  " -s      Inherit library symbols for modules (the X Server still inherits).\n",
++	  " -h, -?  Prints this message and quits.\n");
++    exit(0);
++}
++
++##############################################################################
++# From xorg-build.pl
++##############################################################################
++# User configuration
++sub git_config {
++    my ($option) = @_;
++
++    $option = `git-config --global --get $option`;
++    $option =~ s/^\s+//;
++    $option =~ s/\s+$//;
++
++    return $option;
++};
++
++my $libname = git_config("xorg-git.lib-name");
++if ($libname eq "") {
++    $libname = `uname -m`;
++    $libname = $libname =~ m/64/ ? "lib64" : "lib";
++}
++
++my $prefix = $options{'p'};
++unless (defined($prefix)) {
++    $prefix = git_config("xorg-git.dest-dir");
++    $prefix = "$ENV{HOME}/anongit.freedesktop.org/build"
++	if ($prefix eq "" or not -d $prefix);
++    $prefix = "/usr"
++	if ($prefix eq "");
++}
++
++my $module_path = $options{'m'};
++my $module_path = "$prefix/$libname/xorg/modules"
++    unless (defined($module_path));
++
++$ENV{LD_LIBRARY_PATH} = "$prefix/$libname:$ENV{LD_LIBRARY_PATH}";
++##############################################################################
++# End from xorg-build.pl
++##############################################################################
++
++
++print("\n>>> Building X Servers list...\n");
++foreach (split("\n", `find $prefix/bin -perm /a+x -a -type f -a -name X\\*`)) {
++    $servers{$_} = Cwd::realpath($_);
++    # Only know about Xorg as a loader capable X Server
++    if ($servers{$_} =~ /Xorg/) {
++	$loaders{$servers{$_}} = 1;
++    }
++}
++
++print("\n>>> Building modules list...\n");
++foreach my $path (split(":", $module_path)) {
++    foreach (split("\n", `find $path -type f -a -name \\*.so`)) {
++	$modules{$_} = Cwd::realpath($_);
++    }
++}
++
++
++##############################################################################
++sub pathname {
++    my ($path) = @_;
++
++    return $options{'f'} ? $path : File::Basename::basename($path);
++};
++
++
++##############################################################################
++sub build_dep {
++    my ($binary) = @_;
++
++    my ($kind, $type, $hidden, $symbol, $und, $where);
++
++    open(OBJ, "objdump -t -T -w --demangle $binary |") or die("objdump");
++    while (<OBJ>) {
++	last if /SYMBOL TABLE:/;
++    }
++
++    while (<OBJ>) {
++	last if /DYNAMIC SYMBOL TABLE:/;
++
++	# remove 8 hex digits and spaces
++	s/\S+\s+//;
++
++	# check for known type
++	if (s/(\S)\s+(F|O)\s+//) {
++	    $kind = $1;
++	    $type = $2;
++	    s/\S+\s+//;
++	}
++	# unknown type
++	elsif (s/(\S)(\s+)?\*UND\*\s+//) {
++	    $kind = $1;
++	    $type = "";
++	}
++	# not interesting, debug info, etc
++	else {
++	    next;
++	}
++
++	# remove 8 hex digits and spaces
++	s/\S+\s+//;
++
++	# check for hidden symbol
++	if (s/(\.hidden)\s+//) {
++	    $hidden = 1;
++	}
++	else {
++	    $hidden = 0;
++	}
++	
++	# symbol name
++	if (/(\S+)/) {
++	    $symbol = $1;
++	}
++	else {
++	    next;
++	    # parse error??
++	}
++
++	# symbols to ignore
++	next if (not $options{'a'} and grep($_ eq $symbol, @ignore));
++
++	if ($hidden != 0) {
++	    $hiddens{$binary}{$symbol} = 1;
++	}
++	$types{$binary}{$symbol} = $type;
++	$weaks{$binary}{$symbol} = $kind if ($kind eq "w");
++    }
++
++    while (<OBJ>) {
++	# remove 8 hex digits and spaces
++	s/\S+\s+//;
++
++	if (s/D(O|F)?\s+\*UND\*//) {
++	    $type = $1;
++	    $und = 1;
++	    $kind = undef;
++	}
++	elsif (s/w\s+D\s+(\*UND\*)?//) {
++	    $type = "";
++	    $und = 1;
++	    $kind = "w";
++	}
++	elsif (s/g\s+D(O|F)?\s+\S+//) {
++	    $type = $1;
++	    $und = 0;
++	    $kind = undef;
++	}
++	# weak symbol
++	elsif (s/w\s+D(O|F)\s+\S+//) {
++	    $type = $1;
++	    $und = 0;
++	    $kind = "w";
++	}
++	else {
++	    # *ABS* or parse error??
++	    next;
++	}
++
++	# remove spaces and 8 hex digits and spaces
++	s/\s+\S+\s+//;
++
++	if (/(\S+)\s+(\S+)/) {
++	    $where = $1;
++	    $symbol = $2;
++	}
++	elsif (/(\S+)/) {
++	    $symbol = $1;
++	    $where = undef;
++	}
++	else {
++	    # parse error?
++	    next;
++	}
++
++	# symbols to ignore
++	next if (not $options{'a'} and grep($_ eq $symbol, @ignore));
++
++	if ($where) {
++	    $bases{$binary}{$symbol} = $where;
++	}
++
++	if ($und != 0) {
++	    $undefs{$binary}{$symbol} = 1;
++	}
++	elsif ($type ne "") {
++	    # Set value to 0, to also use as a counter for external
++	    # references, if applicable
++	    $exports{$binary}{$symbol} = 0;
++	    $dynamics{$binary}{$symbol} = $type;
++	}
++
++	$weaks{$binary}{$symbol} = $kind if ($kind eq "w");
++    }
++    close OBJ;
++}
++##############################################################################
++
++
++##############################################################################
++sub merge_dep {
++    my ($binary, $object) = @_;
++    
++    foreach (keys %{$types{$object}}) {
++	$types{$binary}{$_} = $types{$object}{$_}
++	    unless defined($types{$binary}{$_});
++    }
++    foreach (keys %{$exports{$object}}) {
++	if ($undefs{$binary}{$_}) {
++	    delete($undefs{$binary}{$_});
++	}
++	$exports{$binary}{$_} = $exports{$object}{$_}
++	    unless defined($exports{$binary}{$_});
++    }
++    foreach (keys %{$undefs{$object}}) {
++	$undefs{$binary}{$_} = $undefs{$object}{$_}
++	    unless defined($exports{$binary}{$_});
++    }
++
++    # Don't provide symbols of libraries to modules if option -s is used
++    if (not $options{'s'} or $servers{$binary}) {
++	foreach (keys %{$dynamics{$object}}) {
++						# Dont store type information
++						# or code bellow will not
++						# know where it defined.
++	    $dynamics{$binary}{$_} = ""		# $dynamics{$object}{$_}
++		unless defined($dynamics{$binary}{$_});
++	}
++    }
++}
++##############################################################################
++
++
++##############################################################################
++# Check ldd output for extra libraries, and also "cache" the information
++print("\n>>> Loading symbol information...\n");
++foreach my $binary (keys %servers, keys %modules) {
++    print("--> ", pathname($binary), "\n");
++    if (grep($_ eq $binary, @objects)) {
++	print("**** Parsing $binary twice!\n");
++	next;
++    }
++    push(@objects, $binary);
++    build_dep($binary);
++    foreach (`ldd $binary`) {
++        if (/\s+\S+\s+=>\s+(\S+)\s+\S+/ or /^\s+(\S+)\s+\S+$/) {
++	    my $library = Cwd::realpath($1);
++	    print("     ", pathname($library));
++	    unless (grep($_ eq $library, @objects)) {
++		build_dep($library);
++	    }
++	    else {
++		print(" (cached)");
++	    }
++	    print("\n");
++	    push(@objects, $library);
++	    $libraries{$binary}{$library} = 1;
++	}
++    }
++}
++
++
++##############################################################################
++# Check for clashes, possibly with library symbols
++print("\n>>> Checking symbol clashes...\n");
++foreach my $object (keys %servers) {
++    foreach my $other (keys %exports) {
++	# If a library linked agains't the binary, or a loader capable
++	# Xserver and checking a module
++	if ($libraries{$object}{$other} or
++	    ($loaders{$object} and $modules{$other})) {
++	    foreach my $symbol (keys %{$exports{$object}}) {
++		if (defined($exports{$other}{$symbol}) and
++		    not defined($weaks{$other}{$symbol})) {
++		    $clashes{$symbol}{$object} = 1;
++		    $clashes{$symbol}{$other} = 1;
++		}
++	    }
++	}
++    }
++}
++
++
++##############################################################################
++# Print information about clashes
++foreach my $symbol (keys %clashes) {
++    my $found = 0;
++    print(" ** $symbol: ");
++    foreach my $object (keys %{$clashes{$symbol}}) {
++	if (++$found > 1) {
++	    print(", ");
++	}
++	print(pathname($object));
++    }
++    print("\n");
++}
++
++
++##############################################################################
++# Process ldd output again, this time to "augment" symbol list of
++# objects/binaries with the ones in the required libraries
++print("\n>>> Checking library dependencies...\n");
++foreach my $binary (keys %servers, keys %modules) {
++    foreach (`ldd $binary`) {
++        if (/\s+\S+\s+=>\s+(\S+)\s+\S+/ or /^\s+(\S+)\s+\S+$/) {
++	    merge_dep($binary, Cwd::realpath($1));
++	}
++    }
++}
++
++##############################################################################
++# Check shared objects
++print("\n>>> Checking undefined symbols...\n");
++foreach my $object (keys %servers, keys %modules) {
++    print("--> ", pathname($object), "\n");
++    foreach my $undefined (keys %{$undefs{$object}}) {
++	my $found = 0;
++	foreach my $other (keys %dynamics) {
++	    # use defined($dynamics{$other}{$undefined}) to also match
++	    # inherited symbols from libraries
++	    if (defined($dynamics{$other}{$undefined}) and
++		($loaders{$other} or $modules{$other})) {
++		if (not $dynamics{$other}{$undefined} or
++		    not $options{'x'} or
++		    not $loaders{$other}) {
++		    print("    Symbol $undefined found: ");
++		    # check if defined in more than one object
++		    # if it is being exporting it from a library
++		    foreach (keys %dynamics) {
++			if ($dynamics{$_}{$undefined}) {
++			    if (++$found > 1) {
++				print(", ");
++			    }
++			    print(pathname($_));
++			}
++		    }
++		    print("\n");
++		}
++		# Don't print warning if not checking symbols defined
++		# in the X Server
++		elsif ($dynamics{$other}{$undefined}) {
++		    ++$found;
++		}
++		++$exports{$other}{$undefined};
++		goto found;
++	    }
++	}
++	# Check if symbol is in the list of hidden symbols
++	# of some shared object
++	foreach my $other (keys %hiddens) {
++	    if ($hiddens{$object}{$undefined}) {
++		print(" ** Hidden symbol $undefined in binary ",
++		      pathname($object),
++		      " is required by:\n");
++		foreach my $key (keys %undefs) {
++		    if ($undefs{$key}{$undefined}) {
++			print("\t", pathname($key), "\n");
++		    }
++		}
++	    }
++	}
++	found:
++	if ($found == 0) {
++	    print(" ** Undefined symbol $undefined\n");
++	}
++    }
++}
++
++
++##############################################################################
++unless ($options{'e'}) {
++    print("\n>>> Checking exported symbols not ",
++	  "(directly) used in other modules...\n");
++    foreach my $object (keys %exports) {
++    print "--> ", pathname($object), "\n";
++	if ($loaders{$object} or $modules{$object}) {
++	    foreach my $symbol (keys %{$exports{$object}}) {
++		if ($exports{$object}{$symbol} == 0 and
++		    $dynamics{$object}{$symbol}) {
++		    print "  $dynamics{$object}{$symbol} $symbol\n";
++		}
++	    }
++	}
++    }
++}
++
+diff --git a/xorg-scripts/xorg-trace.pl b/xorg-scripts/xorg-trace.pl
+new file mode 100755
+index 0000000..6f6291d
+--- /dev/null
++++ b/xorg-scripts/xorg-trace.pl
+@@ -0,0 +1,187 @@
++#!/usr/bin/perl
++
++##############################################################################
++#  Copyright (C) 2007, 2008 Paulo Cesar Pereira de Andrade.  All Rights Reserved.
++#
++#  This is free software; you can redistribute it and/or modify
++#  it under the terms of the GNU General Public License as published by
++#  the Free Software Foundation; either version 2 of the License, or
++#  (at your option) any later version.
++#
++#  This software is distributed in the hope that it will be useful,
++#  but WITHOUT ANY WARRANTY; without even the implied warranty of
++#  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++#  GNU General Public License for more details.
++#
++#  Authors:
++#	Paulo Cesar Pereira de Andrade <pcpa@mandriva.com.br>
++##############################################################################
++
++use Cwd;
++use File::Basename;
++use Getopt::Std;
++
++use strict;
++
++my %filenames;
++my %options;
++
++
++##############################################################################
++# Check for command line options
++# TODO add possibly risky option of not creating dependency of libc and
++# gcc header files, and possibly others; the X Protocol for example
++# isn't expected to change, but some structures, usually extensions still can...
++Getopt::Std::getopts("p:n:ish?", \%options);
++if ($options{'h'} or $options{'?'}) {
++    print("Usage:\n",
++	  File::Basename::basename($0), " [options ...]\n",
++	  " -p path  Use given path as root build dir [default: .]\n",
++	  " -n name  Name for new dependency file [default: name of base directory]",
++	  " -i       Install mode. Traces new files.\n",
++	  " -s       Silent mode.\n",
++	  " -h, -?   Prints this message and quits.\n");
++    exit(0);
++}
++
++
++##############################################################################
++# Check root build dir
++$options{'p'} = Cwd::realpath(".") unless $options{'p'};
++$options{'n'} = File::Basename::basename($options{'p'}) unless $options{'n'};
++my $depfile = "$options{p}/$options{n}.deps";
++my $instfile = "$options{p}/$options{n}.files";
++
++$ENV{TMP} = "/tmp" unless ($ENV{TMP} ne "");
++
++my $stracefile = "$ENV{TMP}/$options{n}.strace.$$";
++
++
++##############################################################################
++# From xorg-build.pl
++##############################################################################
++sub git_config {
++    my ($option) = @_;
++
++    $option = `git-config --global --get $option`;
++    $option =~ s/^\s+//;
++    $option =~ s/\s+$//;
++
++    return $option;
++};
++
++my $x_builddir = git_config("xorg-git.build-dir");
++$x_builddir = "$ENV{HOME}/anongit.freedesktop.org/build" unless ($x_builddir);
++my $x_depsdir = git_config("xorg-git.deps-dir");
++$x_depsdir = "/usr/local/xorg/deps" unless ($x_depsdir);
++my $x_destdir = git_config("xorg-git.dest-dir");
++$x_destdir = "/usr/local/xorg" unless ($x_destdir);
++##############################################################################
++# End From xorg-build.pl
++##############################################################################
++
++
++
++##############################################################################
++my $buildtree = $options{'p'};
++my $strace = "/usr/bin/strace";
++my $arguments = "-o$stracefile -q -s256 -etrace=execve,open -f";
++
++# Verify program and arguments to run and trace execution
++my $make = join(" ", @ARGV);
++if ($make eq "") {
++    $make = "make" . ($options{'i'} ? " install" : "");
++}
++
++# Strace build
++print("   $strace $arguments $make\n");
++
++# trace it!   and print output so it can be logged
++open(STRACE, "$strace $arguments $make|");
++while(<STRACE>) {
++    print($_);
++}
++close(STRACE);
++
++die("Strace exit code $? ($!)") if ($?);
++
++
++##############################################################################
++# Build dependency file based on opens and execs during build
++open(STRACE, "<$stracefile") or die("Cannot read $stracefile ($!)\n");
++while (<STRACE>) {
++    chomp;
++
++    # If did open or exec file file.
++    # Also check for files opened to write, like gcc temp files
++    # And also don't generate dependencies on directories
++    if (m/^\d+\s+(\w+)\("([^"]+)".*\) = \d+$/) {
++	my $syscall = $1;
++	my $filename = $2;
++
++	# Only care about fully specified pathnames
++	next unless ($filename =~ m/^\//);
++
++	$filename = Cwd::realpath($filename);
++
++	# Don't care about files inside build tree or temp dir
++	next if ($filename =~ m/^$buildtree/ or
++		 $filename =~ m/^$ENV{TMP}/ or
++		 $filename =~ m/^\/tmp\// or
++		 $filename =~ m/\.cache$/);
++
++	# Also don't care about anything not in builddir or destdir
++	# XXX FIXME This doesn't catch install outside destdir...
++	next if ($filename !~ m/^$x_builddir/ and
++		 $filename !~ m/^$x_destdir/);
++
++	# Install mode
++	if ($options{'i'}) {
++	    if ($syscall eq "open") {
++		# Only log new files
++		next unless (m/O_WRONLY|O_RDWR/);
++		# Only care about files
++		next if (m/O_DIRECTORY/);
++		$filenames{$filename} = 0;
++	    }
++	    else {
++		$filenames{$filename} = 1;
++	    }
++	}
++
++	# Build mode
++	else {
++	    # Don't generate dependency on new files or directory checks
++	    if ($syscall eq "open") {
++		next if (m/O_WRONLY|O_RDWR|O_DIRECTORY/);
++	    }
++
++	    $filenames{$filename} = 1;
++	}
++    }
++}
++close(STRACE);
++`rm -f $stracefile`;
++
++
++##############################################################################
++# Write dependency and file list
++
++open(DEP, ">>$depfile") or die("Cannot append to $depfile ($!).");
++open(LST, ">>$instfile") or die("Cannot open $instfile for writing ($!).");
++foreach (keys %filenames) {
++    # For now don't cache rename or something like link/unlink
++    # So, just check if file exists... If some file is missed
++    # xorg-deps.pl should flag it
++    if (-f $_) {
++	if ($filenames{$_} == 0) {
++	    print(LST "$_\n");
++	}
++	# Add install dependency
++	else {
++	    print(DEP "$_\n");
++	}
++    }
++}
++close(LST);
++close(DEP);
+-- 
+1.5.6
+
