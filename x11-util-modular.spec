@@ -1,7 +1,7 @@
 Name:		x11-util-modular
 Summary:	Set of scripts to manage modular X.org packages
 Version:	0.0.2
-Release:	14
+Release:	15
 Group:		Development/X11
 ########################################################################
 # git clone git://anongit.freedesktop.org/xorg/util/modular xorg/util/modular
